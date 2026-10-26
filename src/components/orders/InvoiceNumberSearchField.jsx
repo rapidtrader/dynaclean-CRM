@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+/**
+ * Typeahead search for tax invoice numbers (order upload / link flows).
+ */
 export default function InvoiceNumberSearchField({
-  name,
-  label,
-  value,
+  label = "Invoice Number",
+  name = "invoice_number",
+  value = "",
   onChange,
   required = false,
-  placeholder = "Search or type invoice number",
+  placeholder = "Search invoice number…",
 }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -41,18 +44,16 @@ export default function InvoiceNumberSearchField({
     }
   }, []);
 
-  const onInputChange = (e) => {
+  const handleInput = (e) => {
     const next = e.target.value;
-    onChange(next);
+    onChange?.(next);
     setOpen(true);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      fetchSuggestions(next);
-    }, 280);
+    debounceRef.current = setTimeout(() => fetchSuggestions(next), 280);
   };
 
-  const pickSuggestion = (num) => {
-    onChange(num);
+  const pick = (num) => {
+    onChange?.(num);
     setOpen(false);
     setSuggestions([]);
   };
@@ -65,11 +66,12 @@ export default function InvoiceNumberSearchField({
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
-  useEffect(() => {
-    return () => {
+  useEffect(
+    () => () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, []);
+    },
+    [],
+  );
 
   return (
     <div ref={wrapRef} className="relative">
@@ -81,15 +83,18 @@ export default function InvoiceNumberSearchField({
         name={name}
         value={value}
         required={required}
-        onChange={onInputChange}
+        autoComplete="off"
+        placeholder={placeholder}
+        onChange={handleInput}
         onFocus={() => {
           setOpen(true);
           if (String(value || "").trim()) fetchSuggestions(value);
         }}
-        placeholder={placeholder}
-        autoComplete="off"
         className="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
+      <p className="mt-1 text-xs text-gray-500">
+        Type to search invoices, then pick from the list.
+      </p>
 
       {open && (loading || suggestions.length > 0) && (
         <ul
@@ -105,7 +110,7 @@ export default function InvoiceNumberSearchField({
                   type="button"
                   className="w-full text-left px-3 py-2 hover:bg-blue-50 text-gray-800"
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => pickSuggestion(num)}
+                  onClick={() => pick(num)}
                 >
                   {num}
                 </button>
