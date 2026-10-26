@@ -1,0 +1,755 @@
+"use client";
+
+import TypeableDateFilterInput from "@/components/ui/TypeableDateFilterInput";
+import Link from "next/link";
+import dayjs from "dayjs";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
+import { Eye, CreditCard, Pencil, Link2, Edit3 } from "lucide-react";
+import Modal from "./Model";
+import StatementLinkModal from "./StatementLinkModal";
+import MultiStatementLinkModal from "./MultiStatementLinkModal";
+
+export default function ExpenseTable({ rows, role, activeEmployeesList }) {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  const dashboardBase = (() => {
+    const match = pathname?.match(/^\/[\w-]+-dashboard/);
+    return match ? match[0] : "/admin-dashboard";
+  })();
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [fromDate, setFromDate] = useState(dayjs().startOf("month").format("YYYY-MM-DD"));
+  const [toDate, setToDate] = useState(dayjs().endOf("month").format("YYYY-MM-DD"));
+  const [selectedEmployee, setSelectedEmployee] = useState("");
+  const [selectedExpenseIds, setSelectedExpenseIds] = useState(new Set());
+
+  // Function to update URL search params
+  const updateQueryParam = useCallback((name, value) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value) {
+      params.set(name, value);
+    } else {
+      params.delete(name);
+    }
+    router.push(`${pathname}?${params.toString()}`, { scroll: false });
+  }, [searchParams, pathname, router]);
+
+  // Sync with URL search params
+  useEffect(() => {
+    const userParam = searchParams.get("username");
+    if (userParam !== null) {
+      setSelectedEmployee(userParam);
+      // If we are coming from a link with a username, we might want to see all their expenses
+      // but only if it's the first time or explicitly intended. 
+      // For now, let's keep it simple: just sync the employee.
+    } else {
+      setSelectedEmployee("");
+    }
+  }, [searchParams]);
+  const [selectedStatus, setSelectedStatus] = useState("");
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
+  const [isMultiLinkModalOpen, setIsMultiLinkModalOpen] = useState(false);
+  const [selectedRow, setSelectedRow] = useState(null);
+  const [selectedRowForLink, setSelectedRowForLink] = useState(null);
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: "asc" });
+
+  // Get unique employees for the filter - filter by active list if provided
+  const employees = Array.from(new Set(rows.map((row) => row.username)))
+    .filter(Boolean)
+    .filter(username => !activeEmployeesList || activeEmployeesList.includes(username))
+    .sort();
+
+  // Filter rows based on the search query, employee, date range, and status
+  const filteredRows = rows.filter((row) => {
+    const totalCost =
+      Number(row.TicketCost || 0) +
+      Number(row.HotelCost || 0) +
+      Number(row.MealsCost || 0) +
+      Number(row.OtherExpenses || 0);
+
+    const formattedDate = dayjs(row.TravelDate).format("DD-MM-YYYY");
+
+    // Check if any field matches the search query
+    const matchesSearch =
+      Object.values(row)
+        .join(" ")
+        .toLowerCase()
+        .includes(searchQuery.toLowerCase()) ||
+      formattedDate.toLowerCase().includes(searchQuery.toLowerCase());
+
+    const matchesEmployee = !selectedEmployee || row.username === selectedEmployee;
+
+    const matchesStatus = !selectedStatus || row.approval_status === selectedStatus;
+
+    const matchesDateRange =
+      (!fromDate || dayjs(row.TravelDate).isAfter(dayjs(fromDate).subtract(1, "day"))) &&
+      (!toDate || dayjs(row.TravelDate).isBefore(dayjs(toDate).add(1, "day")));
+
+    return matchesSearch && matchesEmployee && matchesStatus && matchesDateRange;
+  });
+
+  const isDirector = (role || "").toUpperCase() === "DIRECTOR";
+
+  const getRowTotal = (row) =>
+    Number(row.TicketCost || 0) +
+    Number(row.HotelCost || 0) +
+    Number(row.MealsCost || 0) +
+    Number(row.OtherExpenses || 0);
+
+  const getApprovedValue = (row) =>
+    row.approval_status === "Rejected" ? 0 : Number(row.approved_amount || 0);
+
+  const isBlankAmount = (value) =>
+    value == null || value === "" || Number.isNaN(Number(value)) || Number(value) <= 0;
+
+  const isBlankDate = (value) => !value || value === "0000-00-00";
+
+  const statusOf = (row) => (row.approval_status || "").toLowerCase();
+
+  const calculateTotals = (data) => {
+    const summary = {
+      totalAmount: 0,
+      totalCount: 0,
+      rejectedAmount: 0,
+      rejectedCount: 0,
+      approvedAmount: 0,
+      approvedCount: 0,
+      pendingApprovalAmount: 0,
+      pendingApprovalCount: 0,
+      pendingPaymentAmount: 0,
+      pendingPaymentCount: 0,
+      paidAmount: 0,
+      paidCount: 0,
+    };
+
+    data.forEach((row) => {
+      const uploaded = getRowTotal(row);
+      const approvedAmt = Number(row.approved_amount || 0);
+      const status = statusOf(row);
+
+      summary.totalAmount += uploaded;
+      summary.totalCount += 1;
+
+      if (status === "rejected") {
+        summary.rejectedAmount += uploaded;
+        summary.rejectedCount += 1;
+      }
+
+      if (status === "approved") {
+        summary.approvedAmount += approvedAmt > 0 ? approvedAmt : uploaded;
+        summary.approvedCount += 1;
+      }
+
+      if (status === "pending" && isBlankAmount(row.approved_amount)) {
+        summary.pendingApprovalAmount += uploaded;
+        summary.pendingApprovalCount += 1;
+      }
+
+      if (status === "approved" && isBlankDate(row.payment_date)) {
+        summary.pendingPaymentAmount += approvedAmt > 0 ? approvedAmt : uploaded;
+        summary.pendingPaymentCount += 1;
+      }
+
+      if (status === "approved" && !isBlankDate(row.payment_date)) {
+        summary.paidAmount += approvedAmt > 0 ? approvedAmt : uploaded;
+        summary.paidCount += 1;
+      }
+    });
+
+    return summary;
+  };
+
+  const {
+    totalAmount,
+    totalCount,
+    rejectedAmount,
+    rejectedCount,
+    approvedAmount,
+    approvedCount,
+    pendingApprovalAmount,
+    pendingApprovalCount,
+    pendingPaymentAmount,
+    pendingPaymentCount,
+    paidAmount,
+    paidCount,
+  } = calculateTotals(filteredRows);
+
+  const handleSort = (key) => {
+    setSortConfig((prev) =>
+      prev.key === key
+        ? { key, direction: prev.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "asc" }
+    );
+  };
+
+  const sortedRows = [...filteredRows].sort((a, b) => {
+    if (!sortConfig.key) return 0;
+    const dir = sortConfig.direction === "asc" ? 1 : -1;
+    const key = sortConfig.key;
+
+    const getVal = (row) => {
+      switch (key) {
+        case "ID":
+          return Number(row.ID || 0);
+        case "TravelDate":
+          return row.TravelDate ? dayjs(row.TravelDate).valueOf() : 0;
+        case "username":
+          return (row.username || "").toLowerCase();
+        case "FromLocation":
+          return (row.FromLocation || "").toLowerCase();
+        case "Tolocation":
+          return (row.Tolocation || "").toLowerCase();
+        case "Total":
+          return getRowTotal(row);
+        case "approved_amount":
+          return getApprovedValue(row);
+        case "payment_date":
+          return row.payment_date && row.payment_date !== "0000-00-00"
+            ? dayjs(row.payment_date).valueOf()
+            : 0;
+        case "approval_status":
+          return (row.approval_status || "").toLowerCase();
+        default:
+          return 0;
+      }
+    };
+
+    const va = getVal(a);
+    const vb = getVal(b);
+    if (typeof va === "string" || typeof vb === "string") {
+      return va.localeCompare(vb) * dir;
+    }
+    return (va - vb) * dir;
+  });
+
+  // Helper function to check if expense is settled
+  const isExpenseSettled = (row) => {
+    try {
+      const linkedIds = JSON.parse(row.linked_statement_ids || "[]");
+      return linkedIds.length > 0;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const toggleExpenseSelection = (id, row) => {
+    if (row.approval_status !== "Approved") {
+      alert("Only approved expenses can be selected for linking");
+      return;
+    }
+    if (isExpenseSettled(row)) {
+      alert("Settled expenses cannot be selected");
+      return;
+    }
+    setSelectedExpenseIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const eligibleRows = sortedRows.filter(row => 
+      row.approval_status === "Approved" && !isExpenseSettled(row)
+    );
+    const currentlySelectedEligible = eligibleRows.filter(row => selectedExpenseIds.has(row.ID));
+    if (currentlySelectedEligible.length === eligibleRows.length && eligibleRows.length > 0) {
+      // Deselect only eligible ones
+      setSelectedExpenseIds(prev => {
+        const newSet = new Set(prev);
+        eligibleRows.forEach(row => newSet.delete(row.ID));
+        return newSet;
+      });
+    } else {
+      // Select all eligible
+      setSelectedExpenseIds(prev => {
+        const newSet = new Set(prev);
+        eligibleRows.forEach(row => newSet.add(row.ID));
+        return newSet;
+      });
+    }
+  };
+
+  const calculateSelectedTotals = () => {
+    let selectedTotalAmount = 0;
+    let selectedApprovedAmount = 0;
+    sortedRows.forEach(row => {
+      if (selectedExpenseIds.has(row.ID)) {
+        selectedTotalAmount += getRowTotal(row);
+        const isRejected = row.approval_status === "Rejected";
+        const rowApproved = Number(row.approved_amount || 0);
+        if (!isRejected && rowApproved > 0) {
+          selectedApprovedAmount += rowApproved;
+        }
+      }
+    });
+    return { selectedTotalAmount, selectedApprovedAmount };
+  };
+
+  const { selectedTotalAmount, selectedApprovedAmount } = calculateSelectedTotals();
+
+  const SortIcon = ({ column }) => {
+    if (sortConfig.key !== column) return null;
+    return <span className="ml-1">{sortConfig.direction === "asc" ? "▲" : "▼"}</span>;
+  };
+
+  // Reset all filters
+  const handleReset = () => {
+    setSearchQuery("");
+    setSelectedEmployee("");
+    updateQueryParam("username", "");
+    setSelectedStatus("");
+    setFromDate(dayjs().startOf("month").format("YYYY-MM-DD"));
+    setToDate(dayjs().endOf("month").format("YYYY-MM-DD"));
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setSelectedRow(null);
+  };
+
+  const handlePaymentSuccess = () => {
+    // You can update state or fetch the rows again to reflect the change in the table.
+    // Example: setRows(updatedRows);
+    closeModal(); // Close the modal
+  };
+
+  const handleLinkSuccess = () => {
+    // Optionally refresh data if needed, but router.refresh() inside modal might handle it
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Cards */}
+      <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 ${isDirector ? "xl:grid-cols-6" : "xl:grid-cols-5"} gap-4 mb-4`}>
+        <div className="bg-white p-4 rounded-lg shadow border-l-4 border-blue-600">
+          <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Total</div>
+          <div className="text-2xl font-bold text-gray-800">₹{totalAmount.toFixed(2)}</div>
+          <div className="text-xs text-gray-500 mt-1">{totalCount} uploaded by employees</div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow border-l-4 border-red-600">
+          <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Rejected</div>
+          <div className="text-2xl font-bold text-gray-800">₹{rejectedAmount.toFixed(2)}</div>
+          <div className="text-xs text-gray-500 mt-1">{rejectedCount} rejected</div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow border-l-4 border-green-600">
+          <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Approved</div>
+          <div className="text-2xl font-bold text-gray-800">₹{approvedAmount.toFixed(2)}</div>
+          <div className="text-xs text-gray-500 mt-1">{approvedCount} approved</div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow border-l-4 border-yellow-600">
+          <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Pending approval</div>
+          <div className="text-2xl font-bold text-gray-800">₹{pendingApprovalAmount.toFixed(2)}</div>
+          <div className="text-xs text-gray-500 mt-1">{pendingApprovalCount} pending, amount blank</div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow border-l-4 border-orange-600">
+          <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Pending to payment</div>
+          <div className="text-2xl font-bold text-gray-800">₹{pendingPaymentAmount.toFixed(2)}</div>
+          <div className="text-xs text-gray-500 mt-1">{pendingPaymentCount} approved, not paid</div>
+        </div>
+        {isDirector && (
+          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-teal-600">
+            <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Paid</div>
+            <div className="text-2xl font-bold text-gray-800">₹{paidAmount.toFixed(2)}</div>
+            <div className="text-xs text-gray-500 mt-1">{paidCount} paid</div>
+          </div>
+        )}
+        {selectedExpenseIds.size > 0 && (
+          <div className="bg-white p-4 rounded-lg shadow border-l-4 border-purple-600">
+            <div className="flex justify-between items-start">
+              <div>
+                <div className="text-sm text-gray-500 font-medium uppercase tracking-wider">Selected Approved Amount</div>
+                <div className="text-2xl font-bold text-gray-800">₹{selectedApprovedAmount.toFixed(2)}</div>
+              </div>
+              <button
+                onClick={() => setIsMultiLinkModalOpen(true)}
+                className="text-purple-600 hover:text-purple-800 cursor-pointer"
+                title="Link Payment"
+              >
+                <Link2 size={20} />
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-2 sm:gap-4 mb-4">
+        <input
+          type="text"
+          placeholder="Search anything..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="px-4 py-2 border rounded-lg w-full sm:w-auto"
+        />
+        <select
+          value={selectedEmployee}
+          onChange={(e) => {
+            const val = e.target.value;
+            setSelectedEmployee(val);
+            updateQueryParam("username", val);
+          }}
+          className="px-4 py-2 border rounded-lg w-full sm:w-auto"
+        >
+          <option value="">All Employees</option>
+          {employees.map((emp) => (
+            <option key={emp} value={emp}>
+              {emp}
+            </option>
+          ))}
+        </select>
+        <select
+          value={selectedStatus}
+          onChange={(e) => setSelectedStatus(e.target.value)}
+          className="px-4 py-2 border rounded-lg w-full sm:w-auto"
+        >
+          <option value="">All Status</option>
+          <option value="Pending">Pending</option>
+          <option value="Approved">Approved</option>
+          <option value="Rejected">Rejected</option>
+        </select>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <span className="text-sm text-gray-500 hidden sm:inline">From:</span>
+          <TypeableDateFilterInput value={fromDate} onChange={setFromDate} className="px-4 py-2 border rounded-lg w-full sm:w-auto"/>
+        </div>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <span className="text-sm text-gray-500 hidden sm:inline">To:</span>
+          <TypeableDateFilterInput value={toDate} onChange={setToDate} className="px-4 py-2 border rounded-lg w-full sm:w-auto"/>
+        </div>
+        <button
+          onClick={handleReset}
+          className="px-4 py-2 bg-gray-300 rounded-lg text-sm cursor-pointer w-full sm:w-auto hover:bg-gray-400 transition-colors"
+        >
+          Reset
+        </button>
+      </div>
+      {/* Desktop Table View */}
+      <div className="hidden md:block overflow-auto bg-white shadow rounded-lg">
+        <table className="min-w-full table-auto text-sm">
+          <thead className="bg-gray-100 sticky top-0 z-10">
+            <tr className="text-left font-semibold text-gray-700">
+              <th className="p-3">
+                <input
+                  type="checkbox"
+                  checked={sortedRows.filter(row => 
+                    row.approval_status === "Approved" && 
+                    !isExpenseSettled(row)
+                  ).length > 0 && selectedExpenseIds.size === sortedRows.filter(row => 
+                    row.approval_status === "Approved" && 
+                    !isExpenseSettled(row)
+                  ).length}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 cursor-pointer"
+                />
+              </th>
+              <th onClick={() => handleSort("ID")} className="p-3 cursor-pointer select-none">ID<SortIcon column="ID" /></th>
+              <th onClick={() => handleSort("TravelDate")} className="p-3 cursor-pointer select-none">Date<SortIcon column="TravelDate" /></th>
+              <th onClick={() => handleSort("username")} className="p-3 cursor-pointer select-none">Username<SortIcon column="username" /></th>
+              <th onClick={() => handleSort("FromLocation")} className="p-3 cursor-pointer select-none">From<SortIcon column="FromLocation" /></th>
+              <th onClick={() => handleSort("Tolocation")} className="p-3 cursor-pointer select-none">To<SortIcon column="Tolocation" /></th>
+              <th onClick={() => handleSort("Total")} className="p-3 cursor-pointer select-none">Total<SortIcon column="Total" /></th>
+              <th onClick={() => handleSort("approved_amount")} className="p-3 cursor-pointer select-none">Approved Amt<SortIcon column="approved_amount" /></th>
+              <th className="p-3">Approved By</th>
+              <th onClick={() => handleSort("payment_date")} className="p-3 cursor-pointer select-none">Payment Date<SortIcon column="payment_date" /></th>
+              <th onClick={() => handleSort("approval_status")} className="p-3 cursor-pointer select-none">Status<SortIcon column="approval_status" /></th>
+              <th className="p-3">Linked Statements</th>
+              <th className="p-3">Action</th>
+            </tr>
+          </thead>
+          <tbody className="text-gray-800 divide-y divide-gray-200">
+            {sortedRows.length > 0 ? (
+              sortedRows.map((row) => {
+                const totalCost =
+                  Number(row.TicketCost || 0) +
+                  Number(row.HotelCost || 0) +
+                  Number(row.MealsCost || 0) +
+                  Number(row.OtherExpenses || 0);
+
+                return (
+                  <tr key={row.ID}>
+                    <td className="p-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedExpenseIds.has(row.ID)}
+                        onChange={() => toggleExpenseSelection(row.ID, row)}
+                        className="w-4 h-4 cursor-pointer"
+                        disabled={row.approval_status !== "Approved" || isExpenseSettled(row)}
+                      />
+                    </td>
+                    <td className="p-3">{row.ID}</td>
+                    <td className="p-3">
+                      {row.TravelDate
+                        ? dayjs(row.TravelDate).format("DD-MM-YYYY")
+                        : "-"}
+                    </td>
+                    <td className="p-3">{row.username}</td>
+                    <td className="p-3">{row.FromLocation}</td>
+                    <td className="p-3">{row.Tolocation}</td>
+                    <td className="p-3">₹{totalCost.toFixed(2)}</td>
+                    <td className="p-3">
+                      {row.approval_status === "Rejected" ||
+                      !(Number(row.approved_amount) > 0)
+                        ? "-"
+                        : `₹${Number(row.approved_amount).toFixed(2)}`}
+                    </td>
+                    <td className="p-3">{row.approved_by || "-"}</td>
+                    <td className="p-3">
+                      {row.payment_date && row.payment_date !== "0000-00-00"
+                        ? dayjs(row.payment_date).format("DD-MM-YYYY")
+                        : "-"}
+                    </td>
+                    <td className="p-3">{row.approval_status}</td>
+                    <td className="p-3">
+                      {(() => {
+                        try {
+                          const linkedIds = JSON.parse(row.linked_statement_ids || "[]");
+                          return linkedIds.length > 0 ? linkedIds.join(", ") : "-";
+                        } catch (e) {
+                          return "-";
+                        }
+                      })()}
+                    </td>
+                    <td className="p-3 flex gap-2 items-center">
+                      <Link
+                        href={`${dashboardBase}/expenses/${row.ID}`}
+                        className="text-blue-600 hover:underline"
+                      >
+                        <Eye size={16} />
+                      </Link>
+                      {row.approval_status !== "Approved" && row.approval_status !== "Rejected" && (
+                        <Link
+                          href={`${dashboardBase}/expenses/edit/${row.ID}`}
+                          className="text-yellow-600 hover:text-yellow-800"
+                          title="Edit Expense"
+                        >
+                          <Pencil size={16} />
+                        </Link>
+                      )}
+                      {role === "SUPERADMIN" && (
+                        <button
+                          onClick={() => {
+                            if (row.approval_status !== "Approved") {
+                              alert("Please Approve the expense first");
+                              return; // Stop execution here
+                            }
+                            setSelectedRow(row); // Store the selected row
+                            setIsModalOpen(true); // Open the modal
+                          }}
+                          className="text-green-600 hover:text-green-800 cursor-pointer"
+                          title="Process Payment"
+                        >
+                          <CreditCard size={16} />
+                        </button>
+                      )}
+
+                      {/* Payment Link / Edit Button - Available for all roles if Approved */}
+                      {row.approval_status === "Approved" && (
+                        !row.linked_statement_ids || JSON.parse(row.linked_statement_ids || "[]").length === 0 ? (
+                          <button
+                            onClick={() => {
+                              setSelectedRowForLink(row);
+                              setIsLinkModalOpen(true);
+                            }}
+                            className="text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                            title="Payment Link"
+                          >
+                            <Link2 size={16} />
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setSelectedRowForLink(row);
+                              setIsLinkModalOpen(true);
+                            }}
+                            className="text-blue-500 hover:text-blue-700 cursor-pointer"
+                            title="Edit Payment Link"
+                          >
+                            <Edit3 size={16} />
+                          </button>
+                        )
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            ) : (
+              <tr>
+                <td colSpan="9" className="p-4 text-center text-gray-500">
+                  No entries found.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {/* Mobile Card View */}
+      <div className="md:hidden flex flex-col gap-4">
+        {sortedRows.length === 0 && (
+          <div className="text-center text-gray-500">No entries found.</div>
+        )}
+
+        {sortedRows.map((row) => {
+          const totalCost =
+            Number(row.TicketCost || 0) +
+            Number(row.HotelCost || 0) +
+            Number(row.MealsCost || 0) +
+            Number(row.OtherExpenses || 0);
+
+          return (
+            <div
+              key={row.ID}
+              className="border rounded-lg p-4 shadow-sm bg-white text-sm space-y-1"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={selectedExpenseIds.has(row.ID)}
+                  onChange={() => toggleExpenseSelection(row.ID, row)}
+                  className="w-4 h-4 cursor-pointer"
+                  disabled={row.approval_status !== "Approved" || isExpenseSettled(row)}
+                />
+                <strong>ID:</strong> {row.ID}
+              </div>
+              <div>
+                <strong>Date:</strong>{" "}
+                {row.TravelDate
+                  ? dayjs(row.TravelDate).format("DD-MM-YYYY")
+                  : "-"}
+              </div>
+              <div>
+                <strong>From:</strong> {row.FromLocation}
+              </div>
+              <div>
+                <strong>To:</strong> {row.Tolocation}
+              </div>
+              <div>
+                <strong>Total:</strong> ₹{totalCost.toFixed(2)}
+              </div>
+              <div>
+                <strong>Approved Amt:</strong>{" "}
+                {row.approval_status === "Rejected" ||
+                !(Number(row.approved_amount) > 0)
+                  ? "-"
+                  : `₹${Number(row.approved_amount).toFixed(2)}`}
+              </div>
+              <div>
+                <strong>Approved By:</strong> {row.approved_by || "-"}
+              </div>
+              <div>
+                <strong>Payment Date:</strong>{" "}
+                {row.payment_date && row.payment_date !== "0000-00-00"
+                  ? dayjs(row.payment_date).format("DD-MM-YYYY")
+                  : "-"}
+              </div>
+              <div>
+                <strong>Status:</strong> {row.approval_status}
+              </div>
+              <div>
+                <strong>Linked Statements:</strong>{" "}
+                {(() => {
+                  try {
+                    const linkedIds = JSON.parse(row.linked_statement_ids || "[]");
+                    return linkedIds.length > 0 ? linkedIds.join(", ") : "-";
+                  } catch (e) {
+                    return "-";
+                  }
+                })()}
+              </div>
+              <div className="flex items-center gap-4 pt-2">
+                <Link
+                  href={`${dashboardBase}/expenses/${row.ID}`}
+                  className="text-blue-600 hover:underline"
+                >
+                  <Eye size={16} />
+                </Link>
+                {row.approval_status !== "Approved" && row.approval_status !== "Rejected" && (
+                  <Link
+                    href={`${dashboardBase}/expenses/edit/${row.ID}`}
+                    className="text-yellow-600 hover:text-yellow-800"
+                    title="Edit Expense"
+                  >
+                    <Pencil size={16} />
+                  </Link>
+                )}
+                {role === "SUPERADMIN" && (
+                  <button
+                    onClick={() => {
+                      if (row.approval_status !== "Approved") {
+                        alert("Please Approve the expense first");
+                        return; // Stop execution here
+                      }
+                      setSelectedRow(row); // Store the selected row
+                      setIsModalOpen(true); // Open the modal
+                    }}
+                    className="text-green-600 hover:text-green-800 cursor-pointer"
+                    title="Process Payment"
+                  >
+                    <CreditCard size={16} />
+                  </button>
+                )}
+
+                {/* Payment Link / Edit Button - Available for all roles if Approved */}
+                {row.approval_status === "Approved" && (
+                  !row.linked_statement_ids || JSON.parse(row.linked_statement_ids || "[]").length === 0 ? (
+                    <button
+                      onClick={() => {
+                        setSelectedRowForLink(row);
+                        setIsLinkModalOpen(true);
+                      }}
+                      className="text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                      title="Payment Link"
+                    >
+                      <Link2 size={16} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setSelectedRowForLink(row);
+                        setIsLinkModalOpen(true);
+                      }}
+                      className="text-blue-500 hover:text-blue-700 cursor-pointer"
+                      title="Edit Payment Link"
+                    >
+                      <Edit3 size={16} />
+                    </button>
+                  )
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <Modal
+        isOpen={isModalOpen}
+        closeModal={closeModal}
+        row={selectedRow}
+        role={role}
+        onPaymentSuccess={handlePaymentSuccess}
+      />
+
+      <StatementLinkModal
+        isOpen={isLinkModalOpen}
+        closeModal={() => setIsLinkModalOpen(false)}
+        row={selectedRowForLink}
+        onLinkSuccess={handleLinkSuccess}
+      />
+
+      <MultiStatementLinkModal
+        isOpen={isMultiLinkModalOpen}
+        closeModal={() => setIsMultiLinkModalOpen(false)}
+        selectedExpenseIds={selectedExpenseIds}
+        selectedApprovedAmount={selectedApprovedAmount}
+        onLinkSuccess={() => setSelectedExpenseIds(new Set())}
+      />
+    </div>
+  );
+}

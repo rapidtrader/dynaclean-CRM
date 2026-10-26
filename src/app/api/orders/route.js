@@ -1,0 +1,530 @@
+import { getDbConnection } from "@/lib/db";
+import { NextResponse } from "next/server";
+import { jwtVerify } from "jose";
+import { canViewAllOrders } from "@/lib/dataScope";
+import {
+  isServiceSupportRole,
+  sqlColumnInActiveServiceSupportUsers,
+} from "@/lib/serviceSupportTeamScope";
+import { parseFormData } from "@/lib/parseForm";
+import fs from "fs/promises"; // Use fs.promises for async file operations
+import path from "path";
+import { sendTemplatedEmail } from "@/lib/template-utils";
+import { syncPreBookingsForOrder } from "@/lib/syncPreBookingsForOrder";
+import { derivePaymentStatus } from "@/lib/paymentOrderStatus";
+import {
+  appendSqlWhereClause,
+  orderListApprovalWhereSql,
+} from "@/lib/orderApprovalVisibility";
+import { ensureNeworderBookingPaymentColumns } from "@/lib/ensureNeworderBookingPaymentColumns";
+import { seedOrderBookingPaymentSnapshot } from "@/lib/seedOrderBookingPaymentSnapshot";
+
+const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
+
+function sanitizeFilename(filename) {
+  if (!filename) return "unnamed";
+  const ext = path.extname(filename);
+  let base = filename.slice(0, -ext.length) || "unnamed";
+  base = base.replace(/[#?[\]{}<>|\\^`~:;@&=+$,"'/*\s]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!base) base = "file";
+  return base + ext;
+}
+
+// Helper function to save a file locally
+async function saveFileLocally(file, subfolder) {
+  if (!file || !file.filepath || !file.originalFilename) {
+    console.warn("⚠️ File missing or invalid for local save:", file);
+    throw new Error("File is missing or invalid");
+  }
+
+  // Create subfolder if it doesn't exist (e.g., 'uploads/po_files', 'uploads/payment_files')
+  const targetSubfolder = path.join(UPLOAD_DIR, subfolder);
+  await fs.mkdir(targetSubfolder, { recursive: true });
+
+  const safeName = sanitizeFilename(file.originalFilename);
+  const fileName = `${Date.now()}-${safeName}`; // Ensure unique filename
+  const targetPath = path.join(targetSubfolder, fileName);
+
+  try {
+    // Read the file content from the temporary path and write to the target path
+    const fileContent = await fs.readFile(file.filepath);
+    await fs.writeFile(targetPath, fileContent);
+    console.log("✅ File saved locally:", targetPath);
+
+    // Return the relative URL path that can be accessed via the browser
+    return `/uploads/${subfolder}/${fileName}`;
+  } finally {
+    // Clean up the temporary file created by formidable
+    await fs.unlink(file.filepath).catch((err) => {
+      console.error("Failed to delete temp file:", err);
+    });
+  }
+}
+
+function generateOrderId(todayCount) {
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  return date + String(todayCount + 1).padStart(3, "0");
+}
+
+/** Works on MySQL/MariaDB versions that do not support ADD COLUMN IF NOT EXISTS. */
+async function ensureNeworderQuotationIdColumn(conn) {
+  const [cols] = await conn.execute(
+    `SELECT 1 AS ok FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'neworder'
+       AND COLUMN_NAME = 'quotation_id'
+     LIMIT 1`,
+  );
+  if (cols?.length) return;
+  await conn.execute(`ALTER TABLE neworder ADD COLUMN quotation_id INT NULL`);
+}
+
+// GET endpoint to fetch orders
+export async function GET(req) {
+  try {
+    const token = req.cookies.get("token")?.value;
+    if (!token)
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(process.env.JWT_SECRET),
+    );
+    const username = payload.username;
+    const userRole = payload.role;
+
+    const conn = await getDbConnection();
+
+    // Ensure new columns exist (safe, runs only if missing)
+    await ensureNeworderQuotationIdColumn(conn);
+
+    const safeAlters = [
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS return_booking_done TINYINT(1) DEFAULT 0",
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS return_booking_date DATE NULL",
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS return_booking_by VARCHAR(100) NULL",
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS warehouse_in_done TINYINT(1) DEFAULT 0",
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS warehouse_in_date DATE NULL",
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS warehouse_in_image VARCHAR(500) NULL",
+      "ALTER TABLE neworder ADD COLUMN IF NOT EXISTS warehouse_in_by VARCHAR(100) NULL",
+    ];
+    for (const alter of safeAlters) {
+      await conn.execute(alter).catch(() => {});
+    }
+
+    // Fetch orders based on role with individual items (not grouped)
+    let sql = `SELECT 
+                  no.order_id, no.report_file, no.po_file, no.payment_proof, no.booking_url,
+                  no.client_name, no.contact, no.is_cancelled, no.dispatch_status,
+                  no.created_at, no.created_by , no.einvoice_file, no.booking_id, no.quote_number, no.duedate,
+                  no.invoice_date , no.account_by ,no.booking_by , no.dispatch_person,
+                  no.payment_id, no.payment_date, no.payment_amount, no.payment_status,no.totalamt, no.transaction_id,
+                  no.baseAmount, no.taxamt,
+                  no.delivery_date, no.delivered_on, no.delivery_status,no.delivery_proof,
+                  no.installation_status, no.is_returned, no.approval_status, no.approval_remark, no.approval_date,
+                  no.return_booking_done, no.return_booking_date, no.return_booking_by,
+                  no.warehouse_in_done, no.warehouse_in_date, no.warehouse_in_image, no.warehouse_in_by,
+                  qr.company_name, qr.emp_name, qr.state,
+                  qi.item_name,
+                  qi.item_code,
+                  qi.quantity,
+                  COALESCE(qi.total_taxable_amt, qi.taxable_price, 0) AS item_taxable_amt
+              FROM 
+                  neworder no
+              LEFT JOIN 
+                  quotations_records qr ON no.quote_number = qr.quote_number
+              LEFT JOIN 
+                  quotation_items qi ON no.quote_number = qi.quote_number`;
+
+    const params = [];
+
+    if (isServiceSupportRole(userRole)) {
+      sql += ` WHERE ${sqlColumnInActiveServiceSupportUsers("no.created_by")}`;
+    } else if (!canViewAllOrders(userRole)) {
+      sql += " WHERE no.created_by = ?";
+      params.push(username);
+    }
+
+    sql = appendSqlWhereClause(sql, orderListApprovalWhereSql(userRole));
+
+    sql += " ORDER BY no.created_at DESC";
+
+    const [orders] = await conn.execute(sql, params);
+
+    return NextResponse.json({ success: true, data: orders });
+  } catch (error) {
+    console.error("Error fetching orders:", error);
+    return NextResponse.json({ error: "Failed to fetch orders" }, { status: 500 });
+  }
+}
+
+export async function POST(req) {
+  try {
+    // 1. Authenticate
+    const token = req.cookies.get("token")?.value;
+    if (!token)
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(process.env.JWT_SECRET),
+    );
+    const username = payload.username;
+    const userRole = payload.role; // Assuming role is in JWT as per login/route.js
+
+    // 2. Parse multipart/form-data
+    const { fields, files } = await parseFormData(req);
+    // Normalize field values from [ 'value' ] → 'value'
+    for (const key in fields) {
+      if (Array.isArray(fields[key])) {
+        fields[key] = fields[key][0];
+      }
+    }
+
+    console.log("📦 Parsed Fields:", fields);
+    console.log("📁 Parsed Files:", files);
+
+    const transactionId = String(
+      fields.transactionId ?? fields.transaction_id ?? "",
+    ).trim();
+    const paymentAmount = String(
+      fields.paymentAmount ?? fields.payment_amount ?? "",
+    ).trim();
+    const paymentDate = String(
+      fields.paymentDate ?? fields.payment_date ?? "",
+    ).trim();
+
+    const {
+      quote_number,
+      client_name,
+      phone,
+      email,
+      delivery_location,
+      company_name,
+      company_address,
+      state,
+      ship_to,
+      salesRemark,
+      clientDeliveryDate,
+      poNumber,
+      item_name,
+      item_code,
+      specification,
+      quantity,
+      unit,
+      price_per_unit,
+      taxable_price,
+      gst,
+      total_price,
+      img_url,
+    } = fields;
+
+    // Validate mandatory fields
+    if (!salesRemark || salesRemark.trim() === "") {
+      return NextResponse.json(
+        { error: "Remark is required" },
+        { status: 400 },
+      );
+    }
+
+    const isGemRole = payload.role === "GEM";
+
+    if (isGemRole && (!poNumber || poNumber.trim() === "")) {
+      return NextResponse.json(
+        { error: "PO Number / Gem Order Number is required" },
+        { status: 400 },
+      );
+    }
+
+    if (!paymentDate || paymentDate.trim() === "") {
+      return NextResponse.json(
+        { error: "Payment Date is required" },
+        { status: 400 },
+      );
+    }
+
+    if (!transactionId || transactionId.trim() === "") {
+      return NextResponse.json(
+        { error: "Transaction ID is required" },
+        { status: 400 },
+      );
+    }
+
+    if (!paymentAmount || paymentAmount.trim() === "") {
+      return NextResponse.json(
+        { error: "Payment Amount is required" },
+        { status: 400 },
+      );
+    }
+
+    if (!files.paymentProofFiles || files.paymentProofFiles.length === 0) {
+      return NextResponse.json(
+        { error: "Payment Proof is required" },
+        { status: 400 },
+      );
+    }
+
+    // 3. Save files locally instead of uploading to Cloudinary
+    // Handle multiple PO files
+    let poFileUrls = [];
+    if (files.poFiles && files.poFiles.length > 0) {
+      for (const file of files.poFiles) {
+        const url = await saveFileLocally(file, "po_files");
+        poFileUrls.push(url);
+      }
+    }
+
+    // Handle multiple payment proof files
+    let paymentProofUrls = [];
+    if (files.paymentProofFiles && files.paymentProofFiles.length > 0) {
+      for (const file of files.paymentProofFiles) {
+        const url = await saveFileLocally(file, "payment_files");
+        paymentProofUrls.push(url);
+      }
+    }
+
+    // Join URLs into comma-separated strings for storage
+    const poFileUrl = poFileUrls.join(", ");
+    const paymentProofUrl = paymentProofUrls.join(", ");
+
+    // 4. Approval Logic
+    const isAutoApproved = ["SUPERADMIN"].includes(userRole);
+    const approvalStatus = isAutoApproved ? "approved" : "pending";
+    const salesStatus = isAutoApproved ? 1 : 0;
+
+    // 5. Insert into DB
+    const conn = await getDbConnection();
+
+    const [[{ count }]] = await conn.execute(
+      "SELECT COUNT(*) AS count FROM neworder WHERE DATE(created_at) = CURDATE()",
+    );
+    const orderId = generateOrderId(count);
+    // console.log("Generated Order ID:", orderId);
+
+    await ensureNeworderQuotationIdColumn(conn);
+    await ensureNeworderBookingPaymentColumns(conn);
+
+    const [quotationRows] = await conn.execute(
+      `SELECT customer_id, payment_term_days, grand_total, \`S.No.\` AS quotation_id
+       FROM quotations_records WHERE quote_number = ? LIMIT 1`,
+      [quote_number],
+    );
+    const quotationRecord = quotationRows?.[0] || {};
+    const customerIdFromQuotation = quotationRecord.customer_id ?? null;
+    const quotationIdFromBody = fields.quotation_id
+      ? Number(fields.quotation_id)
+      : null;
+    const quotationId =
+      Number.isFinite(quotationIdFromBody) && quotationIdFromBody > 0
+        ? quotationIdFromBody
+        : quotationRecord.quotation_id != null
+          ? Number(quotationRecord.quotation_id)
+          : null;
+
+    // Compute duedate = (client may send) OR today + payment_term_days from quotation
+    let duedateISO = fields.duedate;
+    if (!duedateISO) {
+      const days = Number(quotationRecord.payment_term_days) || 0;
+      const today = new Date();
+      const due = new Date(today);
+      due.setDate(due.getDate() + days);
+      duedateISO = due.toISOString().slice(0, 10);
+    }
+
+    const orderTotalForPayment =
+      Number(quotationRecord.grand_total) ||
+      Number(total_price) ||
+      0;
+    const paidAtBooking = Number(paymentAmount) || 0;
+    const paymentStatusAtBooking = derivePaymentStatus({
+      total: orderTotalForPayment,
+      paidAmount: paidAtBooking,
+      deductionAmount: 0,
+      isOverdue: false,
+    });
+
+    // console here
+    console.log("INSERT PARAMS", {
+      quote_number,
+      client_name,
+      phone,
+      email,
+      delivery_location: "",
+      company_name,
+      company_address,
+      state,
+      ship_to,
+    });
+
+    const [result] = await conn.execute(
+      `INSERT INTO neworder
+         (order_id, quote_number, quotation_id, po_file, payment_proof, client_name,
+          contact, email, delivery_location, company_name, company_address,
+          state, sales_status, sales_remark, ship_to, created_by, duedate, client_delivery_date, approval_status,
+          po_number, payment_date, transaction_id, payment_id, payment_amount, payment_status, item_name, item_code, specification,
+          quantity, unit, price_per_unit, taxable_price, gst, total_price, img_url, customer_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        orderId,
+        quote_number,
+        quotationId,
+        poFileUrl,
+        paymentProofUrl,
+        client_name,
+        phone,
+        email,
+        delivery_location,
+        company_name,
+        company_address,
+        state,
+        salesStatus,
+        salesRemark,
+        ship_to,
+        username,
+        duedateISO,
+        clientDeliveryDate || null,
+        approvalStatus,
+        poNumber || null,
+        paymentDate || null,
+        transactionId || null,
+        transactionId || null,
+        paymentAmount || null,
+        paymentStatusAtBooking,
+        item_name || null,
+        item_code || null,
+        specification || null,
+        quantity || null,
+        unit || null,
+        price_per_unit || null,
+        taxable_price || null,
+        gst || null,
+        total_price || null,
+        img_url || null,
+        customerIdFromQuotation,
+      ],
+    );
+
+    try {
+      await seedOrderBookingPaymentSnapshot(conn, orderId, {
+        transactionId,
+        paymentDate,
+        paymentAmount,
+      });
+    } catch (seedErr) {
+      console.error("⚠️ Booking payment snapshot seed failed:", seedErr);
+    }
+
+    // 6. Send Email if pending approval
+    if (approvalStatus === "pending") {
+      try {
+        const adminEmail = "piptrade8@gmail.com";
+        if (adminEmail) {
+          await sendTemplatedEmail(
+            "ORDER_APPROVAL",
+            {
+              order_id: orderId,
+              quote_number: quote_number,
+              company_name: company_name,
+              delivery_location: delivery_location,
+              client_name: client_name,
+              created_by: username,
+              status: "Pending Approval",
+            },
+            {
+              to: adminEmail,
+              // Custom SMTP for approval emails
+              auth: {
+                user: "neha.s",
+                pass: "tl~{9gBU^1ysVTXW", // User provided this pass in a way that suggests it's for this specific use case
+              },
+            },
+          );
+        }
+      } catch (emailErr) {
+        console.error("⚠️ Failed to send approval email:", emailErr);
+      }
+    }
+
+    // 7. Auto-update pre-bookings for this customer & product/item_code
+    try {
+      const deliveryDate = clientDeliveryDate || duedateISO;
+      await syncPreBookingsForOrder(conn, {
+        orderId,
+        quoteNumber: quote_number,
+        customerId: customerIdFromQuotation,
+        deliveryDate,
+      });
+    } catch (preBookingErr) {
+      console.error("⚠️ Error updating pre-bookings:", preBookingErr);
+      // Don't fail the order creation if pre-booking update fails
+    }
+
+    // Seed dispatch rows per quantity from quotation items
+    // 1) Ensure dispatch table exists
+    await conn.execute(`CREATE TABLE IF NOT EXISTS dispatch (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      quote_number VARCHAR(100) NOT NULL,
+      item_name VARCHAR(255) DEFAULT NULL,
+      item_code VARCHAR(100) DEFAULT NULL,
+      serial_no VARCHAR(255) DEFAULT NULL,
+      remarks TEXT DEFAULT NULL,
+      photos TEXT DEFAULT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT NULL,
+      INDEX idx_quote_number (quote_number),
+      INDEX idx_item_code (item_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+    // 2) Check if dispatch rows already exist for this quote
+    const [existingDispatch] = await conn.execute(
+      `SELECT id FROM dispatch WHERE quote_number = ? LIMIT 1`,
+      [quote_number],
+    );
+
+    if (existingDispatch.length === 0) {
+      // 3) Get quotation items for this quote
+      const [quotationItems] = await conn.execute(
+        `SELECT item_name, item_code, quantity FROM quotation_items WHERE quote_number = ?`,
+        [quote_number],
+      );
+
+      // 4) Insert dispatch rows for each item based on quantity
+      for (const item of quotationItems) {
+        const { item_name, item_code, quantity } = item;
+        const qty = Number(quantity) || 0;
+
+        if (qty > 0) {
+          const placeholders = Array.from({ length: qty })
+            .map(() => "(?, ?, ?, NULL, NULL, NULL, NOW(), NULL)")
+            .join(",");
+          const params = [];
+          for (let i = 0; i < qty; i++) {
+            params.push(quote_number, item_name, item_code);
+          }
+          await conn.execute(
+            `INSERT INTO dispatch (quote_number, item_name, item_code, serial_no, remarks, photos, created_at, updated_at) VALUES ${placeholders}`,
+            params,
+          );
+        }
+      }
+
+      // 5) Auto-add dispatch rows for accessories marked as "added" (separate dispatch)
+      try {
+        const { seedAddedAccessoryDispatchRows } = await import("@/lib/seedAddedAccessoryDispatch");
+        await seedAddedAccessoryDispatchRows(conn, quote_number, quotationItems);
+      } catch (accessoryDispatchErr) {
+        console.error("⚠️ Error seeding added accessory dispatch rows:", accessoryDispatchErr);
+      }
+    } else {
+      console.log(`⚠️ Dispatch rows already exist for quote: ${quote_number}. Skipping seeding.`);
+    }
+
+    // conn.end();
+    console.log("✅ Order saved successfully:", orderId);
+    return NextResponse.json({ success: true, orderId }, { status: 201 });
+  } catch (err) {
+    console.error("❌ Order save error:", err);
+    return NextResponse.json(
+      { success: false, error: err.message },
+      { status: 500 },
+    );
+  }
+}

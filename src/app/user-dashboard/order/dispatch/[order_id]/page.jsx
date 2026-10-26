@@ -1,0 +1,804 @@
+"use client";
+import { useEffect, useState } from "react";
+import { useAsyncClick } from "@/lib/useAsyncClick";
+import { buildChecklistAccessoriesUrl } from "@/lib/dispatchChecklistAccessories";
+import { useParams, useRouter } from "next/navigation";
+import { isSpare1110 } from "@/lib/isSpare1110";
+
+export default function DispatchFormPage({ params }) {
+  const router = useRouter();
+  const { order_id } = useParams();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedIds, setSavedIds] = useState(new Set());
+  const [initialSerialNos, setInitialSerialNos] = useState(new Set());
+  const [stockInfo, setStockInfo] = useState({});
+  const [zeroStockWarnings, setZeroStockWarnings] = useState({});
+  const [accessories, setAccessories] = useState({}); // { item_code: [accessories] }
+  const [accessoriesChecked, setAccessoriesChecked] = useState({}); // { rowId: { accessoryId: boolean } }
+  const [accessoryStockInfo, setAccessoryStockInfo] = useState({}); // { rowId: { accessoryId: { stock_count } } }
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const fetchActive = async () => {
+          const res = await fetch(
+            `/api/dispatch?order_id=${order_id}&scope=active`,
+          );
+          const json = await res.json();
+          return json.success ? json.data || [] : [];
+        };
+
+        let data = await fetchActive();
+        if (data.length === 0) {
+          const actRes = await fetch("/api/dispatch/activate-remain", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order_id }),
+          });
+          const actJson = await actRes.json();
+          if (actRes.ok && actJson.success) {
+            data = await fetchActive();
+          }
+        }
+
+        if (data.length > 0) {
+          setRows(data);
+          // Track which rows already have serial numbers from database
+          const idsWithSerialNo = new Set(
+            data
+              .filter((r) => r.serial_no && r.serial_no.trim() !== "")
+              .map((r) => r.id),
+          );
+          setInitialSerialNos(idsWithSerialNo);
+          setSavedIds(idsWithSerialNo);
+
+          // Load in-package accessories checklist only for product rows (not spare dispatch rows)
+          const uniqueProductCodes = [
+            ...new Set(
+              data
+                .map((r) => r.item_code)
+                .filter((code) => code && /[a-zA-Z]/.test(code)),
+            ),
+          ];
+          for (const itemCode of uniqueProductCodes) {
+            loadAccessoriesForProduct(itemCode);
+          }
+
+          // Parse existing accessories_checklist from database
+          const checkedState = {};
+          data.forEach((row) => {
+            if (row.accessories_checklist) {
+              try {
+                const parsed = JSON.parse(row.accessories_checklist);
+                checkedState[row.id] = {};
+                parsed.forEach((acc) => {
+                  checkedState[row.id][acc.id] = true;
+                });
+              } catch (e) {
+                console.error("Failed to parse accessories_checklist:", e);
+              }
+            }
+          });
+          setAccessoriesChecked(checkedState);
+
+          data.forEach((row) => {
+            if (row.godown && row.quote_number && row.item_code) {
+              fetchStockForRow(
+                row.id,
+                row.quote_number,
+                row.godown,
+                row.item_code,
+              );
+            }
+          });
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [order_id]);
+
+  console.log("check data : ", rows);
+
+  const fetchAccessoryStockForRow = async (rowId, godown, itemCode, productAccessories) => {
+    if (!itemCode) {
+      setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/stock/check-accessories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          godown: godown || null,
+          product_code: itemCode,
+          accessories: productAccessories?.length
+            ? productAccessories.map((acc) => ({
+                id: acc.id,
+                accessory_name: acc.accessory_name,
+                spare_id: acc.spare_id || acc.resolved_spare_id,
+              }))
+            : [{ id: 0 }],
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setAccessoryStockInfo((prev) => ({
+          ...prev,
+          [rowId]: data.stockMap || {},
+        }));
+      } else {
+        setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      }
+    } catch (err) {
+      console.error("Failed to fetch accessory stock:", err);
+      setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: null }));
+    }
+  };
+
+  const applyStockFromAccessoryList = (rowId, accessoryList) => {
+    if (!accessoryList?.length) return;
+    const stockMap = {};
+    accessoryList.forEach((acc) => {
+      stockMap[acc.id] = {
+        stock_count: acc.stock_count,
+        matched: acc.stock_matched ?? acc.stock_count != null,
+      };
+    });
+    setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: stockMap }));
+  };
+
+  const fetchStockForRow = async (rowId, quoteNumber, godown, itemCode) => {
+    if (!quoteNumber || !godown || !itemCode) {
+      setStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      setZeroStockWarnings((prev) => ({ ...prev, [rowId]: false }));
+      setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      return;
+    }
+
+    // Find the row to check if it's a service charge
+    const row = rows.find(r => r.id === rowId);
+    if (row && isServiceCharge(row.item_name, row.item_code)) {
+      // Service charges don't need stock check
+      setStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      setZeroStockWarnings((prev) => ({ ...prev, [rowId]: false }));
+      setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/stock/check-single-item", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quote_number: quoteNumber,
+          godown: godown,
+          item_code: itemCode,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setStockInfo((prev) => ({ ...prev, [rowId]: data.stockResults }));
+
+        // Check if any item has 0 or null stock (spare 1110 is allowed at 0 stock)
+        const hasZeroStock =
+          !data.allowZeroStock &&
+          !isSpare1110(itemCode) &&
+          data.stockResults.some(
+            (item) => !item.stock_count || item.stock_count <= 0,
+          );
+        setZeroStockWarnings((prev) => ({ ...prev, [rowId]: hasZeroStock }));
+      } else {
+        const { error } = await res.json();
+        console.error("Stock check error:", error);
+        setStockInfo((prev) => ({ ...prev, [rowId]: null }));
+        setZeroStockWarnings((prev) => ({ ...prev, [rowId]: false }));
+      }
+
+      const productAccessories =
+        accessories[itemCode]?.length > 0
+          ? accessories[itemCode]
+          : await fetch(buildChecklistAccessoriesUrl(itemCode, godown))
+              .then((r) => (r.ok ? r.json() : null))
+              .then((j) => j?.data || [])
+              .catch(() => []);
+
+      fetchAccessoryStockForRow(rowId, godown, itemCode, productAccessories);
+    } catch (err) {
+      console.error("Failed to fetch stock:", err);
+      setStockInfo((prev) => ({ ...prev, [rowId]: null }));
+      setZeroStockWarnings((prev) => ({ ...prev, [rowId]: false }));
+      setAccessoryStockInfo((prev) => ({ ...prev, [rowId]: null }));
+    }
+  };
+
+  const loadAccessoriesForProduct = async (itemCode, godown = null) => {
+    try {
+      const res = await fetch(buildChecklistAccessoriesUrl(itemCode, godown));
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success) {
+          const accessoryList = json.data || [];
+          const resolvedProductCode =
+            accessoryList[0]?.product_code || itemCode;
+
+          setAccessories((prev) => {
+            const next = { ...prev, [itemCode]: accessoryList };
+            if (resolvedProductCode !== itemCode) {
+              next[resolvedProductCode] = accessoryList;
+            }
+            return next;
+          });
+
+          setRows((currentRows) => {
+            currentRows.forEach((row) => {
+              const rowCodes = [row.item_code, resolvedProductCode].filter(Boolean);
+              if (rowCodes.includes(itemCode) || rowCodes.includes(resolvedProductCode)) {
+                if (godown && accessoryList.some((a) => a.stock_count != null)) {
+                  applyStockFromAccessoryList(row.id, accessoryList);
+                } else {
+                  fetchAccessoryStockForRow(
+                    row.id,
+                    row.godown || godown,
+                    row.item_code || itemCode,
+                    accessoryList,
+                  );
+                }
+              }
+            });
+            return currentRows;
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load accessories:", err);
+    }
+  };
+
+  const updateField = (id, field, value) => {
+    setRows((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)),
+    );
+
+    // Fetch stock when godown is selected
+    if (field === "godown") {
+      const row = rows.find((r) => r.id === id);
+      if (row && row.quote_number && row.item_code) {
+        if (value) {
+          // Skip stock check for service charges
+          if (isServiceCharge(row.item_name, row.item_code)) {
+            setStockInfo((prev) => ({ ...prev, [id]: null }));
+            setZeroStockWarnings((prev) => ({ ...prev, [id]: false }));
+            setAccessoryStockInfo((prev) => ({ ...prev, [id]: null }));
+          } else {
+            fetchStockForRow(id, row.quote_number, value, row.item_code);
+          }
+          if (isProductItem(row.item_code)) {
+            loadAccessoriesForProduct(row.item_code, value);
+          }
+        } else {
+          setStockInfo((prev) => ({ ...prev, [id]: null }));
+          setZeroStockWarnings((prev) => ({ ...prev, [id]: false }));
+          setAccessoryStockInfo((prev) => ({ ...prev, [id]: null }));
+        }
+      }
+    }
+  };
+
+  const updateAccessoryCheck = (rowId, accessoryId, checked) => {
+    setAccessoriesChecked((prev) => ({
+      ...prev,
+      [rowId]: {
+        ...(prev[rowId] || {}),
+        [accessoryId]: checked,
+      },
+    }));
+  };
+
+  // Treat items with any alphabet in item_code as "product"; others are spares
+  const isProductItem = (itemCode) => /[a-zA-Z]/.test(itemCode || "");
+
+  // Check if item is a service charge (doesn't require stock check)
+  const isServiceCharge = (itemName, itemCode) => {
+    if (!itemName && !itemCode) return false;
+    const name = (itemName || "").toLowerCase();
+    const code = (itemCode || "").toLowerCase();
+    
+    // Service charges typically contain these keywords
+    return name.includes("camc") || 
+           name.includes("amc") || 
+           name.includes("charges") || 
+           name.includes("service") ||
+           name.includes("labour") ||
+           name.includes("installation") ||
+           code.includes("camc") ||
+           code.includes("amc") ||
+           code.includes("charges") ||
+           code.includes("service");
+  };
+
+  const uploadForRow = async (row) => {
+    const form = new FormData();
+    form.append("id", row.id);
+    if (row.serial_no) form.append("serial_no", row.serial_no);
+    if (row.remarks) form.append("remarks", row.remarks);
+    if (row.godown) form.append("godown", row.godown);
+
+    // Build accessories checklist JSON
+    const productAccessories = getAccessoriesForRow(row);
+    const checkedAccessories = productAccessories.filter(
+      (acc) => accessoriesChecked[row.id]?.[acc.id],
+    );
+    if (checkedAccessories.length > 0) {
+      form.append("accessories_checklist", JSON.stringify(checkedAccessories));
+    }
+
+    // Check if all mandatory accessories are checked
+    const mandatoryAccessories = productAccessories.filter(
+      (acc) => acc.is_mandatory === 1,
+    );
+    const allMandatoryChecked = mandatoryAccessories.every(
+      (acc) => accessoriesChecked[row.id]?.[acc.id],
+    );
+    if (!allMandatoryChecked && mandatoryAccessories.length > 0) {
+      throw new Error("Please check all mandatory accessories before saving.");
+    }
+
+    // append up to 4 photos: front, back, right, left
+    const photoKeys = [
+      "_frontPhoto",
+      "_backPhoto",
+      "_rightPhoto",
+      "_leftPhoto",
+    ];
+    for (const key of photoKeys) {
+      const f = row[key];
+      if (f) form.append("photos", f);
+    }
+
+    if (!row.godown) {
+      throw new Error("Please select a godown before saving.");
+    }
+
+    // Block dispatch if stock is 0 in selected godown (except spare 1110 and service charges)
+    if (zeroStockWarnings[row.id] && 
+        !isSpare1110(row.item_code) && 
+        !isServiceCharge(row.item_name, row.item_code)) {
+      throw new Error(
+        "Stock is 0 in the selected godown. Cannot dispatch this item.",
+      );
+    }
+
+    const res = await fetch("/api/dispatch/update", {
+      method: "POST",
+      body: form,
+    });
+    const json = await res.json();
+    if (!json.success) {
+      // Check for duplicate serial number error
+      if (json.error && json.error.includes("Duplicate entry")) {
+        throw new Error(
+          "Serial number already exists. Please use a unique serial number.",
+        );
+      }
+      throw new Error(json.error || "Failed to update");
+    }
+    setSavedIds((prev) => new Set(prev).add(row.id));
+  };
+
+  const completeAll = async () => {
+    try {
+      setSaving(true);
+      // For products: serial number is mandatory; for spares: serial number is optional
+      const allProductSerialNosFilled = rows
+        .filter((r) => isProductItem(r.item_code))
+        .every((r) => r.serial_no && r.serial_no.trim() !== "");
+      if (!allProductSerialNosFilled) {
+        throw new Error(
+          "Please fill serial numbers for all product items before completing dispatch",
+        );
+      }
+      // Check if all godowns are selected
+      const allGodownsSelected = rows.every(
+        (r) => r.godown && r.godown.trim() !== "",
+      );
+      if (!allGodownsSelected) {
+        throw new Error(
+          "Please select godowns for all items before completing dispatch",
+        );
+      }
+      // Block if any physical item (non-service charge) has 0 stock in selected godown
+      const hasZeroStock = rows.some(
+        (r) => zeroStockWarnings[r.id] && 
+               !isSpare1110(r.item_code) && 
+               !isServiceCharge(r.item_name, r.item_code),
+      );
+      if (hasZeroStock) {
+        throw new Error(
+          "Stock is 0 for one or more items in the selected godown. Please resolve before completing dispatch.",
+        );
+      }
+
+      // Persist godown/serial/stock deduction before marking dispatch complete
+      for (const row of rows) {
+        const alreadyPersisted =
+          initialSerialNos.has(row.id) || savedIds.has(row.id);
+        if (!alreadyPersisted) {
+          await uploadForRow(row);
+        }
+      }
+
+      // mark order dispatch complete
+      const doneRes = await fetch("/api/dispatch/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order_id }),
+      });
+      const doneJson = await doneRes.json();
+      if (!doneRes.ok || !doneJson.success)
+        throw new Error(doneJson.error || "Failed to mark dispatch complete");
+      alert("Dispatch updated and marked complete");
+      router.push(`/user-dashboard/order/dispatch/view/${order_id}`);
+    } catch (e) {
+      alert(e.message || "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const getAccessoriesForRow = (row) =>
+    accessories[row.item_code] ||
+    Object.values(accessories).find((list) =>
+      list.some((acc) => acc.product_code === row.item_code),
+    ) ||
+    [];
+
+  if (loading) return <div className="p-4">Loading...</div>;
+
+  return (
+    <div className="p-4 space-y-4">
+      <h2 className="text-lg font-semibold">Dispatch for Order #{order_id}</h2>
+      {rows.length === 0 ? (
+        <div className="text-gray-600">No dispatch rows.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <div className="space-y-4">
+            {rows.map((r) => (
+              <div key={r.id} className="border rounded-lg p-3">
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-center">
+                  <div className="text-sm min-w-0">
+                    <div className="font-medium truncate" title={r.item_name}>
+                      {r.item_name}
+                    </div>
+                    <div className="text-gray-600 truncate" title={r.item_code}>
+                      {r.item_code}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">
+                      Serial No
+                    </label>
+                    <input
+                      className="border rounded px-2 py-1 w-full disabled:bg-gray-100 disabled:cursor-not-allowed"
+                      value={r.serial_no || ""}
+                      onChange={(e) =>
+                        updateField(r.id, "serial_no", e.target.value)
+                      }
+                      disabled={initialSerialNos.has(r.id)}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">
+                      Godown
+                    </label>
+                    <select
+                      className="border rounded px-2 py-1 w-full disabled:bg-gray-100 disabled:cursor-not-allowed"
+                      value={r.godown || ""}
+                      onChange={(e) =>
+                        updateField(r.id, "godown", e.target.value)
+                      }
+                      disabled={initialSerialNos.has(r.id)}
+                    >
+                      <option value="">Select Godown</option>
+                      <option value="Delhi - Mundka">Delhi - Mundka</option>
+                      <option value="Tamil_Nadu - Coimbatore">
+                        Tamil_Nadu - Coimbatore
+                      </option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">
+                      Remarks
+                    </label>
+                    <input
+                      className="border rounded px-2 py-1 w-full disabled:bg-gray-100 disabled:cursor-not-allowed"
+                      value={r.remarks || ""}
+                      onChange={(e) =>
+                        updateField(r.id, "remarks", e.target.value)
+                      }
+                      disabled={initialSerialNos.has(r.id)}
+                    />
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    Upload Photos (Front, Back, Right, Left)
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    { key: "_frontPhoto", label: "Front" },
+                    { key: "_backPhoto", label: "Back" },
+                    { key: "_rightPhoto", label: "Right" },
+                    { key: "_leftPhoto", label: "Left" },
+                  ].map(({ key, label }) => (
+                    <div
+                      key={key}
+                      className="border rounded-lg p-2 flex flex-col items-stretch justify-center min-w-0"
+                    >
+                      <div className="text-xs mb-2 font-medium">{label}</div>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="block w-full text-xs file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-100 file:text-gray-700 file:text-xs file:cursor-pointer overflow-hidden text-ellipsis disabled:opacity-50 disabled:cursor-not-allowed"
+                        onChange={(e) =>
+                          updateField(
+                            r.id,
+                            key,
+                            (e.target.files && e.target.files[0]) || null,
+                          )
+                        }
+                      />
+                      <div className="mt-1 max-w-full text-[10px] text-gray-600 truncate">
+                        {r[key] && r[key].name ? r[key].name : "No file chosen"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Stock Information Display */}
+                {stockInfo[r.id] && stockInfo[r.id].length > 0 && (
+                  <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-md">
+                    <h4 className="text-sm font-medium text-green-800 mb-2">
+                      Current Stock in {r.godown}:
+                    </h4>
+                    <div className="space-y-1">
+                      {stockInfo[r.id].map((item) => (
+                        <p
+                          key={item.item_code}
+                          className="text-sm text-green-700"
+                        >
+                          {item.item_name || item.item_code}: {item.stock_count}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Zero Stock Warning */}
+                {zeroStockWarnings[r.id] && !isSpare1110(r.item_code) && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
+                    <h4 className="text-sm font-medium text-red-800 mb-1">
+                      ⚠️ Stock Not Available:
+                    </h4>
+                    <p className="text-sm text-red-700">
+                      Stock is 0 in <strong>{r.godown}</strong>. Cannot dispatch this item.
+                    </p>
+                  </div>
+                )}
+
+                {/* In-package accessories checklist (package_status=available only) */}
+                {isProductItem(r.item_code) && getAccessoriesForRow(r).length > 0 && (
+                    <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-md">
+                      <h4 className="text-sm font-medium text-blue-800 mb-2">
+                        In-package accessories (checklist only):
+                      </h4>
+                      <div className="space-y-1">
+                        {getAccessoriesForRow(r).map((acc) => (
+                          <label
+                            key={acc.id}
+                            className="flex items-center gap-2 text-sm cursor-pointer hover:bg-blue-100 p-1 rounded"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={
+                                accessoriesChecked[r.id]?.[acc.id] || false
+                              }
+                              onChange={(e) =>
+                                updateAccessoryCheck(
+                                  r.id,
+                                  acc.id,
+                                  e.target.checked,
+                                )
+                              }
+                              className="cursor-pointer"
+                            />
+                            <span className="flex-1">
+                              {acc.accessory_name}
+                              {acc.is_mandatory === 1 && (
+                                <span
+                                  className="ml-1 text-red-600 font-bold"
+                                  title="Mandatory"
+                                >
+                                  *
+                                </span>
+                              )}
+                            </span>
+                            {r.godown ? (
+                              <span
+                                className={`text-xs font-medium whitespace-nowrap ${
+                                  accessoryStockInfo[r.id]?.[acc.id]
+                                    ?.stock_count > 0
+                                    ? "text-green-700"
+                                    : accessoryStockInfo[r.id]?.[acc.id]
+                                          ?.matched === false
+                                      ? "text-gray-500"
+                                      : "text-red-600"
+                                }`}
+                              >
+                                Stock ({r.godown.split(" - ")[0]}):{" "}
+                                {accessoryStockInfo[r.id]?.[acc.id] == null
+                                  ? "..."
+                                  : accessoryStockInfo[r.id]?.[acc.id]
+                                        ?.matched === false
+                                    ? "N/A"
+                                    : accessoryStockInfo[r.id]?.[acc.id]
+                                        ?.stock_count ?? 0}
+                              </span>
+                            ) : (
+                              <span
+                                className={`text-xs font-medium whitespace-nowrap ${
+                                  accessoryStockInfo[r.id]?.[acc.id]
+                                    ?.stock_count > 0
+                                    ? "text-green-700"
+                                    : accessoryStockInfo[r.id]?.[acc.id]
+                                          ?.matched === false
+                                      ? "text-gray-500"
+                                      : "text-red-600"
+                                }`}
+                              >
+                                Total Stock:{" "}
+                                {accessoryStockInfo[r.id]?.[acc.id] == null
+                                  ? "..."
+                                  : accessoryStockInfo[r.id]?.[acc.id]
+                                        ?.matched === false
+                                    ? "N/A"
+                                    : accessoryStockInfo[r.id]?.[acc.id]
+                                        ?.stock_count ?? 0}
+                              </span>
+                            )}
+                            {acc.description && (
+                              <span className="text-xs text-gray-600 italic">
+                                {acc.description}
+                              </span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                <div className="mt-3 flex items-center gap-3">
+                  {!initialSerialNos.has(r.id) && (
+                    <RowSaveButton
+                      r={r}
+                      uploadForRow={uploadForRow}
+                      globalSaving={saving}
+                      isSaved={savedIds.has(r.id)}
+                      hasSerialNo={r.serial_no && r.serial_no.trim() !== ""}
+                      hasGodown={r.godown && r.godown.trim() !== ""}
+                      isLocked={false}
+                      hasZeroStock={
+                        !!zeroStockWarnings[r.id] && !isSpare1110(r.item_code)
+                      }
+                      isProduct={isProductItem(r.item_code)}
+                    />
+                  )}
+                  {initialSerialNos.has(r.id) && (
+                    <span className="text-xs text-green-700">
+                      ✓ Already saved
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button
+          onClick={() => router.back()}
+          className="px-3 py-1 border rounded"
+        >
+          Back
+        </button>
+        <CompleteButton
+          onComplete={completeAll}
+          disabled={
+            // All godowns must be selected
+            !rows.every((r) => r.godown && r.godown.trim() !== "") ||
+            // For products, serial no is required; for spares, it's optional
+            !rows
+              .filter((r) => isProductItem(r.item_code))
+              .every((r) => r.serial_no && r.serial_no.trim() !== "") ||
+            // Block if any item has 0 stock
+            rows.some(
+              (r) => zeroStockWarnings[r.id] && !isSpare1110(r.item_code),
+            )
+          }
+          saving={saving}
+        />
+      </div>
+    </div>
+  );
+}
+
+function RowSaveButton({
+  r,
+  uploadForRow,
+  globalSaving,
+  isSaved,
+  hasSerialNo,
+  hasGodown,
+  isLocked,
+  hasZeroStock,
+  isProduct,
+}) {
+  const [handleClick, isLoading] = useAsyncClick(async () => {
+    try {
+      await uploadForRow(r);
+    } catch (error) {
+      alert(error.message || "Failed to save");
+      throw error; // Re-throw to prevent marking as saved
+    }
+  });
+
+  const serialRequired = isProduct;
+
+  // Locked rows (stock already deducted): allow updating photos/accessories anytime
+  // Unlocked rows: require serial no (for products), godown, stock > 0, and not already saved
+  const isDisabled = isLocked
+    ? globalSaving || isLoading
+    : globalSaving ||
+      isLoading ||
+      isSaved ||
+      (serialRequired && !hasSerialNo) ||
+      !hasGodown ||
+      hasZeroStock;
+
+  return (
+    <button
+      className="px-3 py-1 bg-blue-600 text-white rounded disabled:opacity-50"
+      disabled={isDisabled}
+      onClick={handleClick}
+    >
+      {isLoading
+        ? "Saving..."
+        : isLocked
+          ? "Update Photos"
+          : isSaved
+            ? "Saved"
+            : "Save"}
+    </button>
+  );
+}
+
+function CompleteButton({ onComplete, disabled, saving }) {
+  const [handleClick, isLoading] = useAsyncClick(async () => {
+    await onComplete();
+  });
+  const pending = saving || isLoading;
+  return (
+    <button
+      onClick={handleClick}
+      disabled={disabled || pending}
+      className="px-3 py-1 bg-emerald-600 text-white rounded disabled:opacity-50"
+    >
+      {pending ? "Completing..." : "Complete"}
+    </button>
+  );
+}

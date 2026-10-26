@@ -1,0 +1,341 @@
+// pages/api/attendance.js or src/app/api/empcrm/attendance/route.js
+
+import { getDbConnection } from "@/lib/db";
+import { getISTDateString, getISTDateTimeString } from "@/lib/istDateTime";
+import { NextResponse } from "next/server";
+import { getSessionPayload } from "@/lib/auth";
+import {
+  ADMIN_EDIT_ATTENDANCE_ADDRESS,
+  ATTENDANCE_EDIT_TRACKED_FIELDS,
+  diffAttendanceEditFields,
+  recordAttendanceEditHistory,
+} from "@/lib/attendanceEditHistory";
+import { ensureAttendanceCheckoutGpsTriggersAllowAdmin } from "@/lib/ensureAttendanceCheckoutGpsTriggers";
+import { ensureAttendanceEditHistoryTable } from "@/lib/ensureAttendanceEditHistoryTable";
+import { lookupAttendanceEmployeeIds } from "@/lib/ensureAttendanceLogsEmployeeColumns";
+
+const HR_ATTENDANCE_ROLES = ["SUPERADMIN", "HR HEAD", "HR", "HR Executive"];
+
+function isHrRole(role) {
+  return role != null && HR_ATTENDANCE_ROLES.includes(String(role));
+}
+
+
+
+const getReverseGeocode = async (lat, lon) => {
+  try {
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`,
+      {
+        headers: {
+          'User-Agent': 'DynacleanIndustriesApp/1.0 (contact@dynacleanindustries.com)'
+        }
+      }
+    );
+
+    // Check if the response was successful before trying to parse
+    if (!response.ok) {
+      const errorBody = await response.text(); // Read the error body
+      console.error('Nominatim API error:', response.status, errorBody);
+      return "Failed to get address";
+    }
+
+    const data = await response.json();
+    return data.display_name || "Address not found";
+
+  } catch (error) {
+    console.error("Reverse geocoding error:", error);
+    return "Failed to get address";
+  }
+};
+
+
+
+export async function GET(req) {
+  const { searchParams } = new URL(req.url);
+  const username = searchParams.get("username");
+  const conn = await getDbConnection();
+  const today = getISTDateString();
+
+  try {
+    const [rows] = await conn.execute(
+      "SELECT * FROM attendance_logs WHERE username = ? AND date = ?",
+      [username, today]
+    );
+
+    const attendanceLog = rows.length > 0 ? rows[0] : null;
+
+    return NextResponse.json(attendanceLog);
+  } catch (error) {
+    console.error("Database error:", error);
+    return NextResponse.json({ error: "Failed to fetch attendance data" }, { status: 500 });
+  } finally {
+    // conn.end();
+    console.log("Database connection closed.");
+    
+  }
+}
+
+export async function POST(req) {
+  const { username, action, latitude, longitude } = await req.json();
+  const conn = await getDbConnection();
+  const today = getISTDateString();
+  const now = getISTDateTimeString();
+
+  // Variable to store location data if provided
+  let locationAddress = null;
+  if (latitude && longitude) {
+    locationAddress = await getReverseGeocode(latitude, longitude);
+  }
+
+  try {
+    switch (action) {
+      case 'checkin': {
+        const checkinLocationless =
+          latitude == null ||
+          latitude === "" ||
+          longitude == null ||
+          longitude === "";
+        if (checkinLocationless) {
+          return NextResponse.json(
+            { error: "Check-in requires GPS location." },
+            { status: 400 }
+          );
+        }
+        const ids = await lookupAttendanceEmployeeIds(conn, username);
+        await conn.execute(
+          "INSERT INTO attendance_logs (username, employee_id, machine_code, date, checkin_time, checkin_latitude, checkin_longitude, checkin_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [username, ids.employee_id, ids.machine_code, today, now, latitude, longitude, locationAddress]
+        );
+        break;
+      }
+
+      case 'break_morning':
+        await conn.execute(
+          "UPDATE attendance_logs SET break_morning_start = ? WHERE username = ? AND date = ?",
+          [now, username, today]
+        );
+        break;
+
+      case 'end_morning':
+        await conn.execute(
+          "UPDATE attendance_logs SET break_morning_end = ? WHERE username = ? AND date = ?",
+          [now, username, today]
+        );
+        break;
+
+      case 'break_lunch':
+        await conn.execute(
+          "UPDATE attendance_logs SET break_lunch_start = ? WHERE username = ? AND date = ?",
+          [now, username, today]
+        );
+        break;
+
+      case 'end_lunch':
+        await conn.execute(
+          "UPDATE attendance_logs SET break_lunch_end = ? WHERE username = ? AND date = ?",
+          [now, username, today]
+        );
+        break;
+
+      case 'break_evening':
+        await conn.execute(
+          "UPDATE attendance_logs SET break_evening_start = ? WHERE username = ? AND date = ?",
+          [now, username, today]
+        );
+        break;
+
+      case 'end_evening':
+        await conn.execute(
+          "UPDATE attendance_logs SET break_evening_end = ? WHERE username = ? AND date = ?",
+          [now, username, today]
+        );
+        break;
+
+      case 'checkout': {
+        const locationless =
+          (latitude == null || latitude === "") &&
+          (longitude == null || longitude === "");
+        if (locationless) {
+          return NextResponse.json(
+            {
+              error: "Checkout requires GPS location. Use the manual Check Out button.",
+            },
+            { status: 400 }
+          );
+        }
+        await conn.execute(
+          "UPDATE attendance_logs SET checkout_time = ?, checkout_latitude = ?, checkout_longitude = ?, checkout_address = ? WHERE username = ? AND date = ?",
+          [now, latitude, longitude, locationAddress, username, today]
+        );
+        break;
+      }
+
+      default:
+        return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Database error:", error);
+    return NextResponse.json({ error: "Failed to perform action" }, { status: 500 });
+  } finally {
+    // conn.end();
+    console.log("Database connection closed.");
+    
+  }
+}
+
+export async function PUT(req) {
+  try {
+    const payload = await getSessionPayload();
+    if (!payload) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (!isHrRole(payload.role)) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const body = await req.json();
+    const { username, date, ...updates } = body;
+
+    if (!username || !date) {
+      return NextResponse.json({ error: "Username and date are required" }, { status: 400 });
+    }
+
+    const allowed = new Set(ATTENDANCE_EDIT_TRACKED_FIELDS);
+    const afterValues = {};
+    for (const [key, value] of Object.entries(updates)) {
+      if (allowed.has(key)) afterValues[key] = value;
+    }
+
+    if (Object.keys(afterValues).length === 0) {
+      return NextResponse.json({ error: "No allowed fields to update" }, { status: 400 });
+    }
+
+    const conn = await getDbConnection();
+    await ensureAttendanceEditHistoryTable(conn);
+    await ensureAttendanceCheckoutGpsTriggersAllowAdmin(conn);
+    const cols = ATTENDANCE_EDIT_TRACKED_FIELDS.join(", ");
+    const [beforeRows] = await conn.execute(
+      `SELECT ${cols} FROM attendance_logs WHERE username = ? AND date = ? LIMIT 1`,
+      [username, date]
+    );
+    if (!beforeRows.length) {
+      return NextResponse.json({ error: "Attendance record not found" }, { status: 404 });
+    }
+
+    const changes = diffAttendanceEditFields(beforeRows[0], afterValues);
+    if (!changes.length) {
+      return NextResponse.json({ error: "No attendance time changes to save." }, { status: 400 });
+    }
+
+    const editRemark = String(body.edit_remark ?? "").trim();
+    if (!editRemark) {
+      return NextResponse.json(
+        { error: "Remark is required when changing attendance times." },
+        { status: 400 }
+      );
+    }
+    if (editRemark.length > 512) {
+      return NextResponse.json(
+        { error: "Remark must be 512 characters or less." },
+        { status: 400 }
+      );
+    }
+
+    const checkinTimeEdited = changes.some((c) => c.field === "checkin_time");
+    const checkoutTimeEdited = changes.some((c) => c.field === "checkout_time");
+
+    const fields = [];
+    const values = [];
+    for (const [key, value] of Object.entries(afterValues)) {
+      fields.push(`${key} = ?`);
+      values.push(value === "" ? null : value);
+    }
+
+    if (checkinTimeEdited) {
+      if (afterValues.checkin_time == null || afterValues.checkin_time === "") {
+        fields.push(
+          "checkin_latitude = NULL",
+          "checkin_longitude = NULL",
+          "checkin_address = NULL"
+        );
+      } else {
+        fields.push(
+          "checkin_latitude = NULL",
+          "checkin_longitude = NULL",
+          "checkin_address = ?"
+        );
+        values.push(ADMIN_EDIT_ATTENDANCE_ADDRESS);
+      }
+    }
+
+    if (checkoutTimeEdited) {
+      if (afterValues.checkout_time == null || afterValues.checkout_time === "") {
+        fields.push(
+          "checkout_latitude = NULL",
+          "checkout_longitude = NULL",
+          "checkout_address = NULL"
+        );
+      } else {
+        fields.push(
+          "checkout_latitude = NULL",
+          "checkout_longitude = NULL",
+          "checkout_address = ?"
+        );
+        values.push(ADMIN_EDIT_ATTENDANCE_ADDRESS);
+      }
+    }
+
+    fields.push("admin_time_edit_remark = ?");
+    values.push(editRemark);
+    values.push(username);
+    values.push(date);
+
+    await conn.execute(
+      `UPDATE attendance_logs SET ${fields.join(", ")} WHERE username = ? AND date = ?`,
+      values
+    );
+
+    const editedBy =
+      payload.username || payload.name || payload.email || String(payload.sub || "unknown");
+    await recordAttendanceEditHistory(conn, {
+      username,
+      logDate: date,
+      editedBy,
+      source: "admin_full_edit",
+      changes,
+      editRemark,
+    });
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Error updating attendance log:", error);
+    return NextResponse.json({ error: "Failed to update attendance log" }, { status: 500 });
+  }
+}
+
+export async function DELETE(req) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const username = searchParams.get("username");
+    const date = searchParams.get("date");
+
+    if (!username || !date) {
+      return NextResponse.json({ error: "Username and date are required" }, { status: 400 });
+    }
+
+    const conn = await getDbConnection();
+
+    await conn.execute(
+      "DELETE FROM attendance_logs WHERE username = ? AND date = ?",
+      [username, date]
+    );
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Error deleting attendance log:", error);
+    return NextResponse.json({ error: "Failed to delete attendance log" }, { status: 500 });
+  }
+}

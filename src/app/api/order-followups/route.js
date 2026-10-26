@@ -1,0 +1,107 @@
+// src/app/api/order-followups/route.js
+import { getDbConnection } from "@/lib/db";
+import { NextResponse } from "next/server";
+import { getSessionPayload } from "@/lib/auth";
+import {
+  isServiceSupportRole,
+  sqlColumnInActiveServiceSupportUsers,
+} from "@/lib/serviceSupportTeamScope";
+
+export async function GET(req) {
+  let connection;
+  try {
+    const payload = await getSessionPayload();
+    const roleNorm = String(payload?.role || payload?.userRole || "")
+      .trim()
+      .toUpperCase();
+    const isServiceSupport = isServiceSupportRole(roleNorm);
+
+    const { searchParams } = new URL(req.url);
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+    const created_by = searchParams.get("created_by");
+
+    connection = await getDbConnection();
+
+    let query = `
+      SELECT 
+        o.order_id, 
+        o.report_file, 
+        o.po_file, 
+        o.payment_proof, 
+        o.booking_url,
+        o.client_name, 
+        o.contact, 
+        o.email, 
+        o.delivery_location,
+        o.created_at, 
+        o.einvoice_file, 
+        o.booking_id,
+        o.created_by,
+        o.quote_number,
+        c.customer_id,
+        q.grand_total,
+        q.subtotal
+      FROM neworder AS o
+      LEFT JOIN customers AS c 
+        ON o.contact = c.phone COLLATE utf8mb4_unicode_ci
+      LEFT JOIN quotations_records AS q
+        ON o.quote_number COLLATE utf8mb4_unicode_ci = q.quote_number COLLATE utf8mb4_unicode_ci
+    `;
+
+    const whereClause = [];
+    const queryParams = [];
+
+    if (isServiceSupport) {
+      whereClause.push(sqlColumnInActiveServiceSupportUsers("o.created_by"));
+    }
+
+    if (startDate) {
+      whereClause.push("o.created_at >= ?");
+      queryParams.push(startDate);
+    }
+    if (endDate) {
+      whereClause.push("o.created_at <= ?");
+      queryParams.push(endDate);
+    }
+    if (created_by) {
+      whereClause.push("o.created_by = ?");
+      queryParams.push(created_by);
+    }
+
+    if (whereClause.length > 0) {
+      query += " WHERE " + whereClause.join(" AND ");
+    }
+
+    query += " ORDER BY o.created_at DESC";
+
+    const [rows] = await connection.execute(query, queryParams);
+
+    const createdByListSql = isServiceSupport
+      ? `SELECT DISTINCT created_by FROM neworder
+         WHERE created_by IS NOT NULL AND created_by != ''
+           AND ${sqlColumnInActiveServiceSupportUsers("created_by")}
+         ORDER BY created_by`
+      : `SELECT DISTINCT created_by FROM neworder
+         WHERE created_by IS NOT NULL AND created_by != ''
+         ORDER BY created_by`;
+
+    const [created_byList] = await connection.execute(createdByListSql);
+
+    return NextResponse.json({
+      data: rows,
+      created_byList: created_byList.map((item) => item.created_by),
+    }, { status: 200 });
+  } catch (error) {
+    console.error("Order-followups API error:", error?.message || error);
+    return NextResponse.json(
+      {
+        error: "Internal Server Error",
+        ...(process.env.NODE_ENV === "development" && {
+          detail: error?.message || String(error),
+        }),
+      },
+      { status: 500 }
+    );
+  }
+}

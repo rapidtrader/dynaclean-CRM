@@ -1,0 +1,3783 @@
+// "use client";
+
+// import React from "react";
+// import jsPDF from "jspdf";
+// import autoTable from "jspdf-autotable";
+// import Image from "next/image";
+// import html2canvas from "html2canvas";
+// import DownloadPDFButton from "@/app/admin-dashboard/invoices/DownloadButton";
+// import InvoicePDFPreview from "../Preview";
+// import { numberToWords } from "@/utils/NumbertoWord";
+
+// const NewInvoice = ({ invoice }) => {
+//   // Calculate tax rate from the invoice data
+//   const calculateTaxRate = () => {
+//     if (invoice.subtotal && invoice.subtotal > 0) {
+//       if (invoice.igst && invoice.igst > 0) {
+//         return ((invoice.igst / invoice.subtotal) * 100).toFixed(2);
+//       } else if (invoice.cgst && invoice.cgst > 0) {
+//         return ((invoice.cgst / invoice.subtotal) * 100).toFixed(2);
+//       }
+//     }
+//     return "0.00";
+//   };
+
+//   // Create items array from invoice items data
+//   const createItemsArray = () => {
+//     // If invoice has items array (from database), use it
+//     if (invoice.items && Array.isArray(invoice.items)) {
+//       return invoice.items.map((item, index) => ({
+//         sr_no: index + 1,
+//         description: item.item_name,
+//         fullDescription: item.description || "",
+//         hsn: item.hsn_code || "",
+//         quantity: parseFloat(item.quantity) || 1,
+//         rate: parseFloat(item.rate) || 0,
+//         discount_percent: parseFloat(item.discount_percent) || 0,
+//         discount_amount: parseFloat(item.discount_amount) || 0,
+//         taxable_value: parseFloat(item.taxable_value) || 0,
+//         cgst_percent: parseFloat(item.cgst_percent) || 0,
+//         sgst_percent: parseFloat(item.sgst_percent) || 0,
+//         igst_percent: parseFloat(item.igst_percent) || 0,
+//         cgst_amount: parseFloat(item.cgst_amount) || 0,
+//         sgst_amount: parseFloat(item.sgst_amount) || 0,
+//         igst_amount: parseFloat(item.igst_amount) || 0,
+//         total_amount: parseFloat(item.total_amount) || 0,
+//         amount: parseFloat(item.taxable_value) || 0,
+//       }));
+//     } else {
+//       // Fallback to old method if no items array
+//       return [
+//         {
+//           sr_no: 1,
+//           description: "Invoice Amount",
+//           fullDescription: "",
+//           hsn: "",
+//           quantity: 1,
+//           rate: invoice.subtotal || 0,
+//           amount: invoice.subtotal || 0,
+//         },
+//       ];
+//     }
+//   };
+
+//   // Convert terms_conditions string to array
+//   const parseTerms = () => {
+//     if (invoice.terms_conditions) {
+//       return invoice.terms_conditions
+//         .split("\n")
+//         .filter((term) => term.trim() !== "");
+//     }
+//     return [];
+//   };
+
+//   // Calculate item-level totals for display
+//   const calculateItemTotals = () => {
+//     if (!invoice.items || !Array.isArray(invoice.items)) {
+//       return {
+//         subtotal: invoice.subtotal || 0,
+//         totalTax: invoice.total_tax || 0,
+//         grandTotal: invoice.grand_total || 0,
+//         totalCGST: invoice.cgst || 0,
+//         totalSGST: invoice.sgst || 0,
+//         totalIGST: invoice.igst || 0,
+//         totalQuantity: 1,
+//       };
+//     }
+
+//     const totals = {
+//       subtotal: 0,
+//       totalTax: 0,
+//       grandTotal: 0,
+//       totalCGST: 0,
+//       totalSGST: 0,
+//       totalIGST: 0,
+//       totalQuantity: 0,
+//     };
+
+//     invoice.items.forEach((item) => {
+//       totals.subtotal += parseFloat(item.taxable_value) || 0;
+//       totals.totalCGST += parseFloat(item.cgst_amount) || 0;
+//       totals.totalSGST += parseFloat(item.sgst_amount) || 0;
+//       totals.totalIGST += parseFloat(item.igst_amount) || 0;
+//       totals.totalTax +=
+//         (parseFloat(item.cgst_amount) || 0) +
+//         (parseFloat(item.sgst_amount) || 0) +
+//         (parseFloat(item.igst_amount) || 0);
+//       totals.grandTotal += parseFloat(item.total_amount) || 0;
+//       totals.totalQuantity += parseFloat(item.quantity) || 0;
+//     });
+
+//     return totals;
+//   };
+
+//   const itemTotals = calculateItemTotals();
+//   const itemsArray = createItemsArray();
+
+//   const data = {
+//     company: {
+//       name: "Dynaclean Industries Pvt Ltd",
+//       address:
+//         "1st Floor, 13-B, Kattabomman Street, Gandhi Nagar Main Road, Gandhi Nagar, Ganapathy, Coimbatore, Tamil Nadu - 641006",
+//       phone: "011-45143666, +91-7982456944",
+//       email: "sales@dynacleanindustries.com",
+//       gstin: "07AAKCD6495M1ZV",
+//     },
+//     buyer: {
+//       name: invoice.customer_name || "",
+//       address: invoice.billing_address || "",
+//       gstin: invoice.gst_number || "",
+//       state: invoice.state || "",
+//       placeOfSupply: invoice.state || "",
+//       contactPerson: invoice.customer_name || "",
+//       phone: invoice.customer_phone || "",
+//       email: invoice.customer_email || "",
+//     },
+//     consignee: {
+//       name: invoice.Consignee || invoice.customer_name || "",
+//       address: invoice.shipping_address || invoice.billing_address || "",
+//       gstin: invoice.gst_number || "",
+//       state: invoice.state || "",
+//       contactPerson: invoice.customer_name || "",
+//       phone: invoice.Consignee_Contact || "",
+//     },
+//     invoice: {
+//       number: invoice.invoice_number || "",
+//       eWayBill: "", // Not in your table
+//       referenceNo: "", // Not in your table
+//       orderDate: invoice.invoice_date
+//         ? new Date(invoice.invoice_date)
+//             .toLocaleDateString("en-GB", {
+//               day: "2-digit",
+//               month: "short",
+//               year: "2-digit",
+//             })
+//             .replace(/ /g, "-")
+//         : "",
+//       dueDate: invoice.due_date
+//         ? new Date(invoice.due_date)
+//             .toLocaleDateString("en-GB", {
+//               day: "2-digit",
+//               month: "short",
+//               year: "2-digit",
+//             })
+//             .replace(/ /g, "-")
+//         : "",
+//     },
+//     items: itemsArray,
+//     taxRate: calculateTaxRate(),
+//     taxAmount: itemTotals.totalTax
+//       ? parseFloat(itemTotals.totalTax).toLocaleString("en-IN", {
+//           minimumFractionDigits: 2,
+//           maximumFractionDigits: 2,
+//         })
+//       : "0.00",
+//     total: itemTotals.grandTotal
+//       ? parseFloat(itemTotals.grandTotal).toLocaleString("en-IN", {
+//           minimumFractionDigits: 2,
+//           maximumFractionDigits: 2,
+//         })
+//       : "0.00",
+//     subtotal: itemTotals.subtotal
+//       ? parseFloat(itemTotals.subtotal).toLocaleString("en-IN", {
+//           minimumFractionDigits: 2,
+//           maximumFractionDigits: 2,
+//         })
+//       : "0.00",
+//     cgst: itemTotals.totalCGST
+//       ? parseFloat(itemTotals.totalCGST).toLocaleString("en-IN", {
+//           minimumFractionDigits: 2,
+//           maximumFractionDigits: 2,
+//         })
+//       : "0.00",
+//     sgst: itemTotals.totalSGST
+//       ? parseFloat(itemTotals.totalSGST).toLocaleString("en-IN", {
+//           minimumFractionDigits: 2,
+//           maximumFractionDigits: 2,
+//         })
+//       : "0.00",
+//     igst: itemTotals.totalIGST
+//       ? parseFloat(itemTotals.totalIGST).toLocaleString("en-IN", {
+//           minimumFractionDigits: 2,
+//           maximumFractionDigits: 2,
+//         })
+//       : "0.00",
+//     amountInWords: "Not Available", // You'll need to implement number to words conversion
+//     taxAmountInWords: "Not Available", // You'll need to implement number to words conversion
+//     terms: parseTerms(),
+//     notes: invoice.notes || "",
+//     bank: {
+//       accountHolderName: "Dynaclean Industries Private Limited",
+//       name: "ICICI Bank",
+//       accountNo: "343405500379",
+//       IFSC: "ICIC0003434",
+//     },
+//     paymentInfo: {
+//       status: invoice.payment_status || "UNPAID",
+//       amountPaid: invoice.amount_paid
+//         ? parseFloat(invoice.amount_paid).toLocaleString("en-IN", {
+//             minimumFractionDigits: 2,
+//             maximumFractionDigits: 2,
+//           })
+//         : "0.00",
+//       balanceAmount: invoice.balance_amount
+//         ? parseFloat(invoice.balance_amount).toLocaleString("en-IN", {
+//             minimumFractionDigits: 2,
+//             maximumFractionDigits: 2,
+//           })
+//         : "0.00",
+//     },
+//   };
+
+//   const containerRef = React.useRef(null);
+
+//   const generatePDF = async () => {
+//     const el = containerRef.current;
+//     if (!el) return;
+
+//     const loadingDiv = document.createElement("div");
+//     loadingDiv.innerHTML = "Generating PDF...";
+//     loadingDiv.style.cssText =
+//       "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:white;padding:20px;border-radius:8px;z-index:9999;font-family:Arial,sans-serif;";
+//     document.body.appendChild(loadingDiv);
+
+//     let styleTag;
+
+//     try {
+//       const originalWidth = el.style.width;
+//       const originalMaxWidth = el.style.maxWidth;
+//       const originalPadding = el.style.padding;
+//       const originalBorder = el.style.border;
+
+//       el.style.width = "794px";
+//       el.style.maxWidth = "794px";
+//       el.style.padding = "30px";
+//       el.style.border = "none";
+
+//       // Convert images to base64
+//       const images = el.querySelectorAll("img");
+//       await Promise.all(
+//         Array.from(images).map(async (img) => {
+//           if (!img.src || img.src.startsWith("data:")) return;
+//           try {
+//             const src = img.currentSrc || img.src;
+//             const res = await fetch(src, {
+//               mode: "cors",
+//               cache: "force-cache",
+//             });
+//             const blob = await res.blob();
+//             const base64 = await new Promise((resolve, reject) => {
+//               const reader = new FileReader();
+//               reader.onloadend = () => resolve(reader.result);
+//               reader.onerror = reject;
+//               reader.readAsDataURL(blob);
+//             });
+//             img.src = base64;
+//             img.removeAttribute("srcset");
+//           } catch (err) {
+//             console.warn("Image conversion failed:", img.src, err);
+//           }
+//         }),
+//       );
+
+//       await new Promise((r) => setTimeout(r, 200));
+
+//       // CRITICAL FIX: Override ALL color functions
+//       styleTag = document.createElement("style");
+//       styleTag.setAttribute("data-pdf-override", "true");
+//       styleTag.innerHTML = `
+//       * {
+//         color: rgb(0, 0, 0) !important;
+//         background-color: rgb(255, 255, 255) !important;
+//         border-color: rgb(0, 0, 0) !important;
+//         outline-color: rgb(0, 0, 0) !important;
+//         box-shadow: none !important;
+//         text-shadow: none !important;
+//       }
+
+//       *::before,
+//       *::after {
+//         color: rgb(0, 0, 0) !important;
+//         background-color: rgb(255, 255, 255) !important;
+//         border-color: rgb(0, 0, 0) !important;
+//       }
+
+//       table {
+//         border-collapse: collapse !important;
+//       }
+
+//       td, th {
+//         page-break-inside: avoid !important;
+//       }
+//     `;
+//       document.head.appendChild(styleTag);
+
+//       await new Promise((r) => setTimeout(r, 100));
+
+//       const canvas = await html2canvas(el, {
+//         scale: 2,
+//         useCORS: true,
+//         allowTaint: false,
+//         foreignObjectRendering: false,
+//         backgroundColor: "#ffffff",
+//         windowWidth: el.scrollWidth,
+//         windowHeight: el.scrollHeight,
+//         logging: false,
+//         imageTimeout: 15000,
+//         onclone: (clonedDoc) => {
+//           const clonedEl =
+//             clonedDoc.body.querySelector("[ref]") ||
+//             clonedDoc.body.firstElementChild;
+//           if (clonedEl) {
+//             clonedEl.style.width = "794px";
+//             clonedEl.style.maxWidth = "794px";
+
+//             // Force RGB colors in cloned document
+//             const allElements = clonedEl.querySelectorAll("*");
+//             allElements.forEach((elem) => {
+//               elem.style.color = "rgb(0, 0, 0)";
+//               elem.style.backgroundColor = "rgb(255, 255, 255)";
+//               elem.style.borderColor = "rgb(0, 0, 0)";
+//             });
+//           }
+//         },
+//       });
+
+//       const imgData = canvas.toDataURL("image/png", 1.0);
+
+//       const pdf = new jsPDF({
+//         orientation: "portrait",
+//         unit: "mm",
+//         format: "a4",
+//         compress: true,
+//       });
+
+//       const pdfWidth = pdf.internal.pageSize.getWidth();
+//       const pdfHeight = pdf.internal.pageSize.getHeight();
+//       const imgProps = pdf.getImageProperties(imgData);
+//       const imgHeight = (imgProps.height * pdfWidth) / imgProps.width;
+
+//       let heightLeft = imgHeight;
+//       let position = 0;
+
+//       pdf.addImage(
+//         imgData,
+//         "PNG",
+//         0,
+//         position,
+//         pdfWidth,
+//         imgHeight,
+//         undefined,
+//         "FAST",
+//       );
+//       heightLeft -= pdfHeight;
+
+//       while (heightLeft > 0) {
+//         position -= pdfHeight;
+//         pdf.addPage();
+//         pdf.addImage(
+//           imgData,
+//           "PNG",
+//           0,
+//           position,
+//           pdfWidth,
+//           imgHeight,
+//           undefined,
+//           "FAST",
+//         );
+//         heightLeft -= pdfHeight;
+//       }
+
+//       pdf.save(`Invoice-${data.invoice.number.replace(/[/\\]/g, "_")}.pdf`);
+
+//       el.style.width = originalWidth;
+//       el.style.maxWidth = originalMaxWidth;
+//       el.style.padding = originalPadding;
+//       el.style.border = originalBorder;
+//     } catch (err) {
+//       console.error("PDF generation failed:", err);
+//       alert("Failed to generate PDF. Check console for details.");
+//     } finally {
+//       if (styleTag && styleTag.parentNode) {
+//         document.head.removeChild(styleTag);
+//       }
+//       if (loadingDiv && loadingDiv.parentNode) {
+//         document.body.removeChild(loadingDiv);
+//       }
+//     }
+//   };
+
+//   // Calculate totals for display
+//   const calculateSubtotal = () => {
+//     return data.items.reduce(
+//       (sum, item) => sum + parseFloat(item.amount || 0),
+//       0,
+//     );
+//   };
+
+//   const formatCurrency = (value) => {
+//     if (!value) return "0.00";
+//     return parseFloat(value).toLocaleString("en-IN", {
+//       minimumFractionDigits: 2,
+//       maximumFractionDigits: 2,
+//     });
+//   };
+
+//   // to add in single hsn calc
+//   const buildHSNSummary = () => {
+//     const map = {};
+
+//     data.items.forEach((item) => {
+//       const hsn = item.hsn || "NA";
+
+//       if (!map[hsn]) {
+//         map[hsn] = {
+//           hsn,
+//           taxableValue: 0,
+//           cgst: 0,
+//           sgst: 0,
+//           igst: 0,
+//           cgstPercent: item.cgst_percent,
+//           sgstPercent: item.sgst_percent,
+//           igstPercent: item.igst_percent,
+//         };
+//       }
+
+//       map[hsn].taxableValue += parseFloat(item.amount || 0);
+//       map[hsn].cgst += parseFloat(item.cgst_amount || 0);
+//       map[hsn].sgst += parseFloat(item.sgst_amount || 0);
+//       map[hsn].igst += parseFloat(item.igst_amount || 0);
+//     });
+
+//     return Object.values(map);
+//   };
+
+//   const hsnSummary = buildHSNSummary();
+
+//   // Function to render tax rows based on available tax data
+//   const renderTaxRows = () => {
+//     const rows = [];
+
+//     if (parseFloat(itemTotals.totalIGST) > 0) {
+//       rows.push(
+//         <tr key="igst">
+//           <td
+//             colSpan="5"
+//             style={{
+//               border: "1px solid #000",
+//               padding: "4px",
+//               textAlign: "right",
+//               fontWeight: "bold",
+//             }}
+//           >
+//             Output IGST {data.taxRate}%
+//           </td>
+//           <td
+//             style={{
+//               border: "1px solid #000",
+//               padding: "4px",
+//               textAlign: "right",
+//             }}
+//           >
+//             {data.igst}
+//           </td>
+//         </tr>,
+//       );
+//     } else {
+//       if (parseFloat(itemTotals.totalCGST) > 0) {
+//         rows.push(
+//           <tr key="cgst">
+//             <td
+//               colSpan="5"
+//               style={{
+//                 border: "1px solid #000",
+//                 padding: "4px",
+//                 textAlign: "right",
+//                 fontWeight: "bold",
+//               }}
+//             >
+//               Output CGST {data.taxRate}%
+//             </td>
+//             <td
+//               style={{
+//                 border: "1px solid #000",
+//                 padding: "4px",
+//                 textAlign: "right",
+//               }}
+//             >
+//               {data.cgst}
+//             </td>
+//           </tr>,
+//         );
+//       }
+
+//       if (parseFloat(itemTotals.totalSGST) > 0) {
+//         rows.push(
+//           <tr key="sgst">
+//             <td
+//               colSpan="5"
+//               style={{
+//                 border: "1px solid #000",
+//                 padding: "4px",
+//                 textAlign: "right",
+//                 fontWeight: "bold",
+//               }}
+//             >
+//               Output SGST {data.taxRate}%
+//             </td>
+//             <td
+//               style={{
+//                 border: "1px solid #000",
+//                 padding: "4px",
+//                 textAlign: "right",
+//               }}
+//             >
+//               {data.sgst}
+//             </td>
+//           </tr>,
+//         );
+//       }
+//     }
+
+//     return rows;
+//   };
+
+//   return (
+//     <>
+//       <div
+//         style={{
+//           display: "flex",
+//           gap: "10px",
+//           padding: "10px",
+//           justifyContent: "flex-end",
+//         }}
+//       >
+//         <button
+//           onClick={generatePDF}
+//           style={{
+//             padding: "10px 20px",
+//             backgroundColor: "#2196F3",
+//             color: "white",
+//             border: "none",
+//             borderRadius: "4px",
+//             cursor: "pointer",
+//           }}
+//         >
+//           Download PDF
+//         </button>
+//         <DownloadPDFButton invoiceData={data} />
+//       </div>
+//       <div
+//         ref={containerRef}
+//         style={{
+//           fontFamily: "Arial, sans-serif",
+//           fontSize: "11px",
+//           maxWidth: "210mm",
+//           margin: "0 auto",
+//           padding: "10mm",
+//           background: "#fff",
+//           backgroundColor: "#fff",
+//           border: "1px solid #000",
+//         }}
+//       >
+//         {/* Header */}
+//         <div
+//           style={{
+//             textAlign: "center",
+//             marginBottom: "5px",
+//             paddingBottom: "5px",
+//           }}
+//         >
+//           <h1 style={{ margin: "0", fontSize: "15px", fontWeight: "semibold" }}>
+//             Tax Invoice
+//           </h1>
+//         </div>
+//         {/* Company Details */}
+//         <table
+//           style={{
+//             width: "100%",
+//             borderCollapse: "collapse",
+//             tableLayout: "fixed",
+//             border: "1px solid #000",
+//             borderBottom: "0px",
+//           }}
+//         >
+//           <tbody>
+//             <tr style={{ height: "110px" }}>
+//               {/* Left - Logo */}
+//               <td style={{ width: "25%" }}>
+//                 <img
+//                   src="/logo.png"
+//                   style={{ width: 110, height: "auto", display: "block" }}
+//                   alt="logo"
+//                 />
+//               </td>
+
+//               {/* Center - Company Details */}
+//               <td style={{ width: "75%" }}>
+//                 <div
+//                   style={{
+//                     display: "flex",
+//                     flexDirection: "column",
+//                     justifyContent: "center",
+//                     alignItems: "center",
+//                     height: "110px",
+//                     textAlign: "center",
+//                   }}
+//                 >
+//                   <div
+//                     style={{
+//                       fontWeight: "bold",
+//                       fontSize: "20px",
+//                       marginBottom: "4px",
+//                       marginTop: "4px",
+//                     }}
+//                   >
+//                     {data.company.name}
+//                   </div>
+
+//                   <div style={{ fontSize: "10px", marginBottom: "4px" }}>
+//                     {data.company.address}
+//                   </div>
+
+//                   <div style={{ fontSize: "10px", marginBottom: "3px" }}>
+//                     Ph: {data.company.phone}
+//                   </div>
+
+//                   <div style={{ fontSize: "10px", marginBottom: "6px" }}>
+//                     GST: {data.company.gstin}
+//                   </div>
+//                 </div>
+//               </td>
+
+//               {/* Right Empty */}
+//               <td style={{ width: "25%" }}></td>
+//             </tr>
+//           </tbody>
+//         </table>
+
+//         {/* Invoice Info Table */}
+//         <table
+//           style={{
+//             width: "100%",
+//             borderCollapse: "collapse",
+//             fontSize: "9px",
+//           }}
+//         >
+//           <tbody>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "0.2px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   width: "33%",
+//                   fontWeight: "bold",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Invoice No.
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   width: "33%",
+//                   fontWeight: "bold",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                   marginBottom: "20px",
+//                 }}
+//               >
+//                 Invoice Date
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   width: "34%",
+//                   fontWeight: "bold",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 Due Date
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {data.invoice.number}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {data.invoice.orderDate}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 {data.invoice.dueDate}
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 <b>Reference No. & Date.</b>
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 <b>Buyer's Order No.</b>
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 <b>Dated</b>
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {data.invoice.referenceNo}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {invoice.quotation_id ? `QT-${invoice.quotation_id}` : ""}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 {data.invoice.orderDate}
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 <b>e-Way Bill No.</b>
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 <b>Payment Status</b>
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 <b>Balance Amount</b>
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {data.invoice.eWayBill}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {data.paymentInfo.status}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   paddingBottom: "10px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 ₹{data.paymentInfo.balanceAmount}
+//               </td>
+//             </tr>
+//           </tbody>
+//         </table>
+
+//         {/* Buyer and Consignee Details */}
+//         <table
+//           style={{
+//             width: "100%",
+//             borderCollapse: "collapse",
+//             marginBottom: "10px",
+//             fontSize: "9px",
+//           }}
+//         >
+//           <tbody>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "6px",
+//                   width: "50%",
+//                   verticalAlign: "top",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 <div style={{ fontWeight: "bold", marginBottom: "4px" }}>
+//                   Buyer (Bill to)
+//                 </div>
+//                 <div style={{ fontWeight: "bold", marginBottom: "2px" }}>
+//                   {data.buyer.name}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   {data.buyer.address}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   GSTIN/UIN : {data.buyer.gstin}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   State Name : {data.buyer.state}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   Place of Supply : {data.buyer.placeOfSupply}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   Contact person : {data.buyer.contactPerson}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   Contact : {data.buyer.phone}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   E-Mail : {data.buyer.email}
+//                 </div>
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "6px",
+//                   width: "50%",
+//                   verticalAlign: "top",
+//                 }}
+//               >
+//                 <div style={{ fontWeight: "bold", marginBottom: "4px" }}>
+//                   Consignee (Ship to)
+//                 </div>
+//                 <div style={{ fontWeight: "bold", marginBottom: "2px" }}>
+//                   {data.consignee.name}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   {data.consignee.address}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   GSTIN/UIN : {data.consignee.gstin}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   State Name : {data.consignee.state}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   Contact person : {data.consignee.contactPerson}
+//                 </div>
+//                 <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//                   Contact : {data.consignee.phone}
+//                 </div>
+//               </td>
+//             </tr>
+//           </tbody>
+//         </table>
+
+//         {/* Additional Info Row */}
+//         <table
+//           style={{
+//             width: "100%",
+//             borderCollapse: "collapse",
+//             fontSize: "9px",
+//           }}
+//         >
+//           <tbody>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   fontWeight: "bold",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 State Code
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   fontWeight: "bold",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 Amount Paid
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {invoice.state_code || ""}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 ₹{data.paymentInfo.amountPaid}
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 colSpan="2"
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   fontWeight: "bold",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 Notes
+//               </td>
+//             </tr>
+//             <tr>
+//               <td
+//                 colSpan="2"
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 {data.notes}
+//               </td>
+//             </tr>
+//           </tbody>
+//         </table>
+
+//         {/* Items Table */}
+//         <table
+//           style={{
+//             width: "100%",
+//             borderCollapse: "collapse",
+//             marginBottom: "10px",
+//             fontSize: "9px",
+//           }}
+//         >
+//           <thead>
+//             <tr style={{ backgroundColor: "#f0f0f0" }}>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "left",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Sl No.
+//               </th>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "left",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Description of Goods
+//               </th>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "left",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 HSN/SAC
+//               </th>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "center",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Quantity
+//               </th>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Rate
+//               </th>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 Amount
+//               </th>
+//             </tr>
+//           </thead>
+//           <tbody>
+//             {data.items.map((item) => (
+//               <tr key={item.sr_no}>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   {item.sr_no}
+//                 </td>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   <div style={{ fontWeight: "bold" }}>{item.description}</div>
+//                   {item.fullDescription && (
+//                     <div
+//                       style={{
+//                         fontSize: "8px",
+//                         marginTop: "2px",
+//                         lineHeight: "1.2",
+//                       }}
+//                     >
+//                       {item.fullDescription}
+//                     </div>
+//                   )}
+//                 </td>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   {item.hsn}
+//                 </td>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     textAlign: "center",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   {item.quantity}
+//                 </td>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     textAlign: "right",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   {formatCurrency(item.rate)}
+//                 </td>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     textAlign: "right",
+//                     borderBottom: "0px",
+//                   }}
+//                 >
+//                   {formatCurrency(item.amount)}
+//                 </td>
+//               </tr>
+//             ))}
+
+//             {/* Tax Rows */}
+//             {renderTaxRows()}
+
+//             <tr>
+//               <td
+//                 colSpan="3"
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   fontWeight: "bold",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Total
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "center",
+//                   fontWeight: "bold",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {itemTotals.totalQuantity}
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   fontWeight: "bold",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 ₹
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   fontWeight: "bold",
+//                 }}
+//               >
+//                 {data.total}
+//               </td>
+//             </tr>
+//           </tbody>
+//         </table>
+
+//         {/* Amount in Words */}
+//         <div style={{ marginBottom: "8px", fontSize: "9px" }}>
+//           <div style={{ fontWeight: "bold", marginBottom: "2px" }}>
+//             Amount Chargeable (in words) E. & O.E
+//           </div>
+//           <br />
+//           <strong>INR- {numberToWords(data.total)}</strong>
+//         </div>
+
+//         {/* Tax Summary Table */}
+//         <table
+//           style={{
+//             width: "100%",
+//             borderCollapse: "collapse",
+//             marginBottom: "10px",
+//             fontSize: "9px",
+//           }}
+//         >
+//           <thead>
+//             <tr style={{ backgroundColor: "#f0f0f0" }}>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "left",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 HSN/SAC
+//               </th>
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   borderBottom: "0px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Taxable Value
+//               </th>
+//               {parseFloat(itemTotals.totalIGST) > 0 ? (
+//                 <>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     IGST
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     Rate
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "right",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     Amount
+//                   </th>
+//                 </>
+//               ) : (
+//                 <>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     CGST
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     Rate
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "right",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     Amount
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     SGST/UTGST
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     Rate
+//                   </th>
+//                   <th
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "right",
+//                       borderBottom: "0px",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     Amount
+//                   </th>
+//                 </>
+//               )}
+//               <th
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   borderBottom: "0px",
+//                 }}
+//               >
+//                 Total Tax Amount
+//               </th>
+//             </tr>
+//           </thead>
+//           <tbody>
+//             {hsnSummary.map((row, idx) => (
+//               <tr key={idx}>
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   {row.hsn}
+//                 </td>
+
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     textAlign: "right",
+//                     borderBottom: "0px",
+//                     borderRight: "0px",
+//                   }}
+//                 >
+//                   {formatCurrency(row.taxableValue)}
+//                 </td>
+
+//                 {parseFloat(itemTotals.totalIGST) > 0 ? (
+//                   <>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "center",
+//                       }}
+//                     >
+//                       IGST
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "center",
+//                       }}
+//                     >
+//                       {row.igstPercent}%
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "right",
+//                       }}
+//                     >
+//                       {formatCurrency(row.igst)}
+//                     </td>
+//                   </>
+//                 ) : (
+//                   <>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "center",
+//                         borderBottom: "0px",
+//                         borderRight: "0px",
+//                       }}
+//                     >
+//                       CGST
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "center",
+//                         borderBottom: "0px",
+//                         borderRight: "0px",
+//                       }}
+//                     >
+//                       {row.cgstPercent}%
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "right",
+//                         borderBottom: "0px",
+//                         borderRight: "0px",
+//                       }}
+//                     >
+//                       {formatCurrency(row.cgst)}
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "center",
+//                         borderBottom: "0px",
+//                         borderRight: "0px",
+//                       }}
+//                     >
+//                       SGST/UTGST
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "center",
+//                         borderBottom: "0px",
+//                         borderRight: "0px",
+//                       }}
+//                     >
+//                       {row.sgstPercent}%
+//                     </td>
+//                     <td
+//                       style={{
+//                         border: "1px solid #000",
+//                         padding: "4px",
+//                         textAlign: "right",
+//                         borderBottom: "0px",
+//                         borderRight: "0px",
+//                       }}
+//                     >
+//                       {formatCurrency(row.sgst)}
+//                     </td>
+//                   </>
+//                 )}
+
+//                 <td
+//                   style={{
+//                     border: "1px solid #000",
+//                     padding: "4px",
+//                     textAlign: "right",
+//                     borderBottom: "0px",
+//                   }}
+//                 >
+//                   {parseFloat(itemTotals.totalIGST) > 0
+//                     ? formatCurrency(row.igst)
+//                     : formatCurrency(row.cgst + row.sgst)}
+//                 </td>
+//               </tr>
+//             ))}
+
+//             {/* TOTAL ROW */}
+//             <tr style={{ fontWeight: "bold" }}>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 Total
+//               </td>
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                   borderRight: "0px",
+//                 }}
+//               >
+//                 {data.subtotal}
+//               </td>
+//               {parseFloat(itemTotals.totalIGST) > 0 ? (
+//                 <>
+//                   <td
+//                     colSpan="2"
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderRight: "0px",
+//                     }}
+//                   ></td>
+//                   <td
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "right",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     {data.igst}
+//                   </td>
+//                 </>
+//               ) : (
+//                 <>
+//                   <td
+//                     colSpan="2"
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderRight: "0px",
+//                     }}
+//                   ></td>
+//                   <td
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "right",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     {data.cgst}
+//                   </td>
+//                   <td
+//                     colSpan="2"
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "center",
+//                       borderRight: "0px",
+//                     }}
+//                   ></td>
+//                   <td
+//                     style={{
+//                       border: "1px solid #000",
+//                       padding: "4px",
+//                       textAlign: "right",
+//                       borderRight: "0px",
+//                     }}
+//                   >
+//                     {data.sgst}
+//                   </td>
+//                 </>
+//               )}
+//               <td
+//                 style={{
+//                   border: "1px solid #000",
+//                   padding: "4px",
+//                   textAlign: "right",
+//                 }}
+//               >
+//                 {data.taxAmount}
+//               </td>
+//             </tr>
+//           </tbody>
+//         </table>
+
+//         {/* Tax Amount in Words */}
+//         <div style={{ marginBottom: "15px", fontSize: "9px" }}>
+//           <strong>
+//             Tax Amount (in words) : INR- {numberToWords(data.taxAmount)}
+//           </strong>
+//         </div>
+
+//         {/* Terms & Bank Details */}
+//         <div style={{ display: "flex", gap: "20px", marginBottom: "15px" }}>
+//           <div style={{ flex: "1", fontSize: "9px" }}>
+//             <div style={{ fontWeight: "bold", marginBottom: "5px" }}>
+//               Terms & Condition
+//             </div>
+//             {data.terms.length > 0 ? (
+//               data.terms.map((term, index) => (
+//                 <div key={index} style={{ marginBottom: "3px" }}>
+//                   {term}
+//                 </div>
+//               ))
+//             ) : (
+//               <div>No terms and conditions specified.</div>
+//             )}
+//           </div>
+//           <div style={{ width: "250px", fontSize: "9px" }}>
+//             <div style={{ fontWeight: "bold", marginBottom: "5px" }}>
+//               Company's Bank Details
+//             </div>
+//             <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//               A/C Holder Name : {data.bank.accountHolderName}
+//             </div>
+//             <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//               Bank Name : {data.bank.name}
+//             </div>
+//             <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//               A/c No. : {data.bank.accountNo}
+//             </div>
+//             <div style={{ fontSize: "10px", marginBottom: "2px" }}>
+//               Branch & IFS Code: {data.bank.IFSC}
+//             </div>
+//           </div>
+//         </div>
+
+//         {/* Signature */}
+//         <div style={{ textAlign: "right", marginTop: "40px", fontSize: "9px" }}>
+//           <div>for {data.company.name}</div>
+//           <div style={{ marginTop: "60px", fontWeight: "bold" }}>
+//             Authorised Signatory
+//           </div>
+//         </div>
+
+//         {/* Footer */}
+//         <div
+//           style={{
+//             textAlign: "center",
+//             marginTop: "20px",
+//             fontSize: "8px",
+//             fontStyle: "italic",
+//           }}
+//         >
+//           This is a Computer Generated Invoice
+//         </div>
+//       </div>
+//       <div style={{ width: "80%", marginTop: "20px" }}>
+//         <InvoicePDFPreview invoiceData={data} />
+//       </div>
+//     </>
+//   );
+// };
+
+// export default NewInvoice;
+"use client";
+
+import React from "react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import Image from "next/image";
+import dynacleanLogo from "@/components/logo1.jpg";
+import html2canvas from "html2canvas";
+import DownloadPDFButton from "@/app/admin-dashboard/invoices/DownloadButton";
+import InvoicePDFPreview from "../Preview";
+import { numberToWords } from "@/utils/NumbertoWord";
+import { INVOICE_LETTERHEAD } from "@/lib/invoiceLetterhead";
+import { filterTermsWhenNotesHasCamc } from "@/lib/performaInvoiceTerms";
+import { isInvoiceCancelledDisplay } from "@/lib/resolveInvoiceCancelledDisplay";
+
+const INVOICE_SIGNATURE_CANDIDATES = [
+  "/s.png",
+  "https://app.dynacleanindustries.com/s.png",
+];
+
+/** PDF: A4 width, single page; height grows with content so sections are not stretched. */
+const INVOICE_PDF_WIDTH_MM = 210;
+const INVOICE_PDF_MIN_HEIGHT_MM = 297;
+const INVOICE_PDF_TOP_MARGIN_MM = 2;
+
+/** Match buyer / line-item table typography in footer blocks */
+const INVOICE_BODY_TEXT_PX = "10px";
+const INVOICE_BODY_LINE_HEIGHT = 1.5;
+const INVOICE_INR_WORDS_PX = "13px";
+const INVOICE_SIGNATURE_FOR_PX = "8px";
+const INVOICE_SIGNATURE_FOR_PT = 8;
+
+const NewInvoice = ({ invoice }) => {
+  const showCancelledWatermark = isInvoiceCancelledDisplay(invoice);
+  // Determine invoice type label
+  const invoiceTypeLabel = invoice.type === "performa" ? "Performa Invoice" : "Tax Invoice";
+  
+  // Calculate tax rate from the invoice data
+  const calculateTaxRate = () => {
+    const storedIgstRate = parseFloat(invoice.igst_rate) || 0;
+    const storedCgstRate = parseFloat(invoice.cgst_rate) || 0;
+    const totalCGST = parseFloat(invoice.cgst) || 0;
+    const totalSGST = parseFloat(invoice.sgst) || 0;
+    const totalIGST = parseFloat(invoice.igst) || 0;
+
+    // Stored amounts decide the tax type — same logic as calculateItemTotals
+    if (totalCGST > 0 || totalSGST > 0) {
+      // CGST+SGST invoice — show CGST rate
+      if (storedCgstRate > 0) return storedCgstRate.toFixed(2);
+      if (invoice.subtotal > 0) return ((totalCGST / invoice.subtotal) * 100).toFixed(2);
+    } else if (totalIGST > 0) {
+      // IGST invoice — show IGST rate
+      if (storedIgstRate > 0) return storedIgstRate.toFixed(2);
+      if (invoice.subtotal > 0) return ((totalIGST / invoice.subtotal) * 100).toFixed(2);
+    } else {
+      // All amounts 0 — fall back to rate columns
+      if (storedIgstRate > 0 && storedCgstRate === 0) return storedIgstRate.toFixed(2);
+      if (storedCgstRate > 0) return storedCgstRate.toFixed(2);
+    }
+    return "0.00";
+  };
+
+  // Create items array from invoice items data
+  const createItemsArray = () => {
+    // If invoice has items array (from database), use it
+    if (invoice.items && Array.isArray(invoice.items)) {
+      return invoice.items.map((item, index) => ({
+        sr_no: index + 1,
+        description: item.item_name,
+        fullDescription: item.description || "",
+        hsn: item.hsn_code || "",
+        quantity: parseFloat(item.quantity) || 1,
+        rate: parseFloat(item.rate) || 0,
+        discount_percent: parseFloat(item.discount_percent) || 0,
+        discount_amount: parseFloat(item.discount_amount) || 0,
+        taxable_value: parseFloat(item.taxable_value) || 0,
+        cgst_percent: parseFloat(item.cgst_percent) || 0,
+        sgst_percent: parseFloat(item.sgst_percent) || 0,
+        igst_percent: parseFloat(item.igst_percent) || 0,
+        cgst_amount: parseFloat(item.cgst_amount) || 0,
+        sgst_amount: parseFloat(item.sgst_amount) || 0,
+        igst_amount: parseFloat(item.igst_amount) || 0,
+        total_amount: parseFloat(item.total_amount) || 0,
+        amount: parseFloat(item.taxable_value) || 0,
+      }));
+    } else {
+      // Fallback to old method if no items array
+      return [
+        {
+          sr_no: 1,
+          description: "Invoice Amount",
+          fullDescription: "",
+          hsn: "",
+          quantity: 1,
+          rate: invoice.subtotal || 0,
+          amount: invoice.subtotal || 0,
+        },
+      ];
+    }
+  };
+
+  // Convert terms_conditions string to array
+  const parseTerms = () => {
+    if (invoice.terms_conditions) {
+      const lines = invoice.terms_conditions
+        .split("\n")
+        .filter((term) => term.trim() !== "");
+      return filterTermsWhenNotesHasCamc(lines, invoice.notes || "");
+    }
+    return [];
+  };
+
+  // Calculate item-level totals for display
+  const calculateItemTotals = () => {
+    const storedIgstRate = parseFloat(invoice.igst_rate) || 0;
+    const storedCgstRate = parseFloat(invoice.cgst_rate) || 0;
+    const storedSgstRate = parseFloat(invoice.sgst_rate) || 0;
+    const subtotal = parseFloat(invoice.subtotal) || 0;
+
+    let totalCGST = parseFloat(invoice.cgst) || 0;
+    let totalSGST = parseFloat(invoice.sgst) || 0;
+    let totalIGST = parseFloat(invoice.igst) || 0;
+
+    // Stored amounts are the primary source of truth.
+    // Rate columns are only used to FILL IN missing amounts (when amount = 0).
+    // Never override a non-zero amount using rate columns.
+
+    if (totalCGST > 0 || totalSGST > 0) {
+      // This is clearly a CGST+SGST invoice — force IGST to 0
+      totalIGST = 0;
+    } else if (totalIGST > 0) {
+      // This is clearly an IGST invoice — force CGST/SGST to 0
+      totalCGST = 0;
+      totalSGST = 0;
+    } else if (subtotal > 0) {
+      // All amounts are 0 — use rate columns to determine tax type
+      if (storedIgstRate > 0 && storedCgstRate === 0) {
+        totalIGST = (subtotal * storedIgstRate) / 100;
+      } else if (storedCgstRate > 0) {
+        totalCGST = (subtotal * storedCgstRate) / 100;
+        totalSGST = (subtotal * storedSgstRate) / 100;
+      }
+    }
+
+    const totals = {
+      subtotal,
+      totalTax: parseFloat(invoice.total_tax) || totalCGST + totalSGST + totalIGST,
+      grandTotal: parseFloat(invoice.grand_total) || 0,
+      totalCGST,
+      totalSGST,
+      totalIGST,
+      totalQuantity: 0,
+    };
+
+    if (invoice.items && Array.isArray(invoice.items)) {
+      invoice.items.forEach((item) => {
+        totals.totalQuantity += parseFloat(item.quantity) || 0;
+      });
+    } else {
+      totals.totalQuantity = 1;
+    }
+
+    return totals;
+  };
+
+  const itemTotals = calculateItemTotals();
+  const itemsArray = createItemsArray();
+
+  const data = {
+    company: { ...INVOICE_LETTERHEAD },
+    buyer: {
+      name: invoice.customer_name || "",
+      address: invoice.billing_address || "",
+      gstin: invoice.gst_number || "",
+      state: invoice.state || "",
+      placeOfSupply: invoice.state || "",
+      contactPerson: invoice.customer_name || "",
+      phone: invoice.customer_phone || "",
+      email: invoice.customer_email || "",
+    },
+    consignee: {
+      name: invoice.Consignee || invoice.customer_name || "",
+      address: invoice.shipping_address || invoice.billing_address || "",
+      gstin: invoice.gst_consignee || invoice.gst_number || "",
+      state: invoice.state || "",
+      contactPerson: invoice.customer_name || "",
+      phone: invoice.Consignee_Contact || "",
+    },
+    invoice: {
+      number: invoice.invoice_number || "",
+      buyersOrderNo: invoice.buyers_order_no || "",
+      eWayBill: invoice.eway_bill_no || "",
+      deliveryChallanNo: invoice.delivery_challan_no || "",
+      referenceNo: invoice.reference_quote_number || invoice.quotation_id || "",
+      referenceNoSno: invoice.reference_quote_sno != null ? String(invoice.reference_quote_sno) : "",
+      stateCode:
+        (invoice.state_code != null && String(invoice.state_code).trim() !== ""
+          ? String(invoice.state_code).trim()
+          : (invoice.gst_number || "").slice(0, 2)) || "",
+      referenceDate: invoice.reference_quote_created_at
+        ? new Date(invoice.reference_quote_created_at)
+            .toLocaleDateString("en-GB", {
+              day: "2-digit",
+              month: "short",
+              year: "2-digit",
+            })
+            .replace(/ /g, "-")
+        : "",
+      invoiceDate: invoice.created_at
+        ? new Date(invoice.created_at)
+            .toLocaleDateString("en-GB", {
+              day: "2-digit",
+              month: "short",
+              year: "2-digit",
+            })
+            .replace(/ /g, "-")
+        : invoice.invoice_date
+          ? new Date(invoice.invoice_date)
+              .toLocaleDateString("en-GB", {
+                day: "2-digit",
+                month: "short",
+                year: "2-digit",
+              })
+              .replace(/ /g, "-")
+          : "",
+      orderDate: invoice.order_date
+        ? new Date(invoice.order_date)
+            .toLocaleDateString("en-GB", {
+              day: "2-digit",
+              month: "short",
+              year: "2-digit",
+            })
+            .replace(/ /g, "-")
+        : invoice.invoice_date
+          ? new Date(invoice.invoice_date)
+              .toLocaleDateString("en-GB", {
+                day: "2-digit",
+                month: "short",
+                year: "2-digit",
+              })
+              .replace(/ /g, "-")
+          : "",
+      dueDate: invoice.due_date
+        ? new Date(invoice.due_date)
+            .toLocaleDateString("en-GB", {
+              day: "2-digit",
+              month: "short",
+              year: "2-digit",
+            })
+            .replace(/ /g, "-")
+        : "",
+    },
+    items: itemsArray,
+    taxRate: calculateTaxRate(),
+    taxAmount: itemTotals.totalTax
+      ? parseFloat(itemTotals.totalTax).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00",
+    roundOff: parseFloat(invoice.round_off) || 0,
+    total: itemTotals.grandTotal
+      ? parseFloat(itemTotals.grandTotal).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00",
+    subtotal: itemTotals.subtotal
+      ? parseFloat(itemTotals.subtotal).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00",
+    cgst: itemTotals.totalCGST
+      ? parseFloat(itemTotals.totalCGST).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00",
+    sgst: itemTotals.totalSGST
+      ? parseFloat(itemTotals.totalSGST).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00",
+    igst: itemTotals.totalIGST
+      ? parseFloat(itemTotals.totalIGST).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00",
+    amountInWords: "Not Available", // You'll need to implement number to words conversion
+    taxAmountInWords: "Not Available", // You'll need to implement number to words conversion
+    terms: parseTerms(),
+    notes: invoice.notes || "",
+    bank: {
+      accountHolderName: "DYNACLEAN INDUSTRIES PRIVATE LIMITED",
+      name: "ICICI Bank",
+      accountNo: "343405500379",
+      IFSC: "ICIC0003434",
+    },
+    paymentInfo: {
+      status: invoice.payment_status || "UNPAID",
+      amountPaid: invoice.amount_paid
+        ? parseFloat(invoice.amount_paid).toLocaleString("en-IN", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })
+        : "0.00",
+      balanceAmount: invoice.balance_amount
+        ? parseFloat(invoice.balance_amount).toLocaleString("en-IN", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })
+        : "0.00",
+    },
+  };
+
+  const [logoSrc, setLogoSrc] = React.useState(dynacleanLogo.src);
+  const [logoErrorStep, setLogoErrorStep] = React.useState(0);
+  const [signatureSrc, setSignatureSrc] = React.useState(
+    INVOICE_SIGNATURE_CANDIDATES[0],
+  );
+  const [signatureErrorStep, setSignatureErrorStep] = React.useState(0);
+
+  const handleLogoError = () => {
+    if (logoErrorStep === 0) {
+      setLogoSrc("/logo1.jpg");
+      setLogoErrorStep(1);
+      return;
+    }
+    if (logoErrorStep === 1) {
+      setLogoSrc("/logo.jpg");
+      setLogoErrorStep(2);
+      return;
+    }
+    if (logoErrorStep === 2) {
+      setLogoSrc("/logo.png");
+      setLogoErrorStep(3);
+      return;
+    }
+    if (logoErrorStep === 3) {
+      setLogoSrc("https://dynacleanindustries.com/logo1.jpg");
+      setLogoErrorStep(4);
+      return;
+    }
+    setLogoSrc("");
+  };
+
+  const handleSignatureError = () => {
+    const next = signatureErrorStep + 1;
+    if (next < INVOICE_SIGNATURE_CANDIDATES.length) {
+      setSignatureErrorStep(next);
+      setSignatureSrc(INVOICE_SIGNATURE_CANDIDATES[next]);
+      return;
+    }
+    setSignatureSrc("");
+  };
+
+  const containerRef = React.useRef(null);
+
+  const generatePDF = async () => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const loadingDiv = document.createElement("div");
+    loadingDiv.innerHTML = "Generating PDF...";
+    loadingDiv.style.cssText =
+      "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.8);color:white;padding:20px;border-radius:8px;z-index:9999;font-family:Arial,sans-serif;";
+    document.body.appendChild(loadingDiv);
+
+    // Off-screen container: renders at full invoice width outside viewport so
+    // html2canvas captures the ENTIRE invoice height, not just what's visible.
+    const offscreenWrapper = document.createElement("div");
+    offscreenWrapper.style.cssText =
+      "position:fixed;left:-9999px;top:0;width:810px;background:#fff;z-index:-1;";
+    document.body.appendChild(offscreenWrapper);
+
+    let clonedEl = null;
+
+    try {
+      // Deep-clone the invoice element into the off-screen wrapper
+      clonedEl = el.cloneNode(true);
+      clonedEl.style.width = "802px";
+      clonedEl.style.maxWidth = "802px";
+      clonedEl.style.padding = "4px";
+      clonedEl.style.border = "none";
+      clonedEl.style.overflow = "visible";
+      clonedEl.style.boxSizing = "border-box";
+      const borderedRoot = clonedEl.querySelector("[data-invoice-border-root]");
+      if (borderedRoot) {
+        borderedRoot.style.border = "1px solid rgb(0, 0, 0)";
+        borderedRoot.style.boxSizing = "border-box";
+        borderedRoot.style.overflow = "visible";
+        borderedRoot.style.paddingBottom = "10px";
+      }
+      offscreenWrapper.appendChild(clonedEl);
+
+      // Let the browser reflow the cloned element at 794px width
+      await new Promise((r) => setTimeout(r, 300));
+
+      // Convert images to base64 in the cloned element
+      const images = clonedEl.querySelectorAll("img");
+      await Promise.all(
+        Array.from(images).map(async (img) => {
+          if (!img.src || img.src.startsWith("data:")) return;
+          try {
+            const src = img.currentSrc || img.src;
+            const res = await fetch(src, {
+              mode: "cors",
+              cache: "force-cache",
+            });
+            if (!res.ok) return;
+            const blob = await res.blob();
+            const base64 = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+            img.src = base64;
+            img.removeAttribute("srcset");
+          } catch (err) {
+            console.warn("Image conversion failed:", img.src, err);
+          }
+        }),
+      );
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Apply color overrides — avoid painting every cell white (can clip text in html2canvas).
+      clonedEl.querySelectorAll("*").forEach((elem) => {
+        elem.style.color = "rgb(0, 0, 0)";
+        elem.style.webkitTextFillColor = "rgb(0, 0, 0)";
+        elem.style.borderColor = "rgb(0, 0, 0)";
+        const tag = elem.tagName?.toLowerCase();
+        if (tag !== "img" && tag !== "td" && tag !== "th" && tag !== "tr" && tag !== "table") {
+          elem.style.backgroundColor = "rgb(255, 255, 255)";
+        }
+        if (tag !== "img") {
+          elem.style.overflow = "visible";
+          elem.style.overflowY = "visible";
+        }
+      });
+
+      const taxSummaryTable = clonedEl.querySelector("[data-invoice-tax-summary]");
+      if (taxSummaryTable) {
+        taxSummaryTable.style.borderCollapse = "separate";
+        taxSummaryTable.style.borderSpacing = "0";
+        taxSummaryTable.querySelectorAll("th, td").forEach((cell) => {
+          cell.style.border = "1px solid rgb(0, 0, 0)";
+          cell.style.paddingTop = "7px";
+          cell.style.paddingBottom = "7px";
+          cell.style.paddingLeft = "5px";
+          cell.style.paddingRight = "5px";
+          cell.style.lineHeight = "1.55";
+          cell.style.verticalAlign = "middle";
+          cell.style.boxSizing = "border-box";
+        });
+      }
+
+      // Improve footer text metrics before capture (keep Notes box padding/border).
+      clonedEl.querySelectorAll("[data-pdf-footer-block]").forEach((block) => {
+        const key = block.getAttribute("data-pdf-footer-block");
+        if (key === "notes") return;
+        if (key === "terms" || key === "bank") {
+          block.style.fontSize = INVOICE_BODY_TEXT_PX;
+          block.style.lineHeight = String(INVOICE_BODY_LINE_HEIGHT);
+          block.style.height = "auto";
+          block.style.minHeight = "0";
+          block.style.paddingTop = "2px";
+          block.style.paddingBottom = "0px";
+          block.style.verticalAlign = "top";
+          block.querySelectorAll("div").forEach((row, idx, list) => {
+            row.style.marginBottom =
+              idx === list.length - 1 ? "0px" : "4px";
+            row.style.fontSize = INVOICE_BODY_TEXT_PX;
+            row.style.lineHeight = String(INVOICE_BODY_LINE_HEIGHT);
+          });
+          return;
+        }
+        block.style.lineHeight = "1.55";
+        block.style.paddingTop = "1px";
+        block.style.paddingBottom = "1px";
+      });
+
+      const notesFooter = clonedEl.querySelector('[data-pdf-footer-block="notes"]');
+      if (notesFooter) {
+        notesFooter.style.width = "100%";
+        notesFooter.style.boxSizing = "border-box";
+        notesFooter.style.overflow = "visible";
+        notesFooter.style.border = "1px solid rgb(0, 0, 0)";
+        const notesBody = notesFooter.querySelector("[data-pdf-notes-body]");
+        const notesLabel = notesFooter.querySelector("[data-pdf-notes-label]");
+        if (notesBody) {
+          notesBody.style.fontSize = INVOICE_BODY_TEXT_PX;
+          notesBody.style.lineHeight = String(INVOICE_BODY_LINE_HEIGHT);
+          notesBody.style.whiteSpace = "pre-wrap";
+          notesBody.style.wordBreak = "break-word";
+          notesBody.style.overflowWrap = "break-word";
+        }
+        if (notesLabel) {
+          notesLabel.style.fontSize = INVOICE_BODY_TEXT_PX;
+          notesLabel.style.lineHeight = String(INVOICE_BODY_LINE_HEIGHT);
+        }
+        notesFooter.style.height = "auto";
+        notesFooter.style.minHeight = "unset";
+        notesFooter.style.paddingTop = "3px";
+        notesFooter.style.paddingBottom = "6px";
+        notesFooter.style.marginTop = "0px";
+        notesFooter.style.marginBottom = "6px";
+        const notesH = Math.max(
+          notesFooter.scrollHeight,
+          notesFooter.offsetHeight,
+          (notesLabel?.offsetHeight || 0) + (notesBody?.scrollHeight || 0) + 16,
+        );
+        notesFooter.style.minHeight = `${notesH}px`;
+      }
+
+      const termsBankTable = clonedEl.querySelector(
+        '[data-pdf-footer-block="terms"]',
+      )?.closest("table");
+      if (termsBankTable) {
+        termsBankTable.style.marginBottom = "0px";
+        termsBankTable.style.height = "auto";
+        termsBankTable.style.borderCollapse = "separate";
+        termsBankTable.style.borderSpacing = "0";
+        const notesRow = termsBankTable.querySelector(
+          '[data-pdf-footer-block="notes"]',
+        )?.closest("td");
+        if (notesRow) {
+          notesRow.style.paddingTop = "10px";
+        }
+        const termsCell = termsBankTable.querySelector(
+          '[data-pdf-footer-block="terms"]',
+        );
+        if (termsCell && clonedEl.querySelector('[data-pdf-footer-block="notes"]')) {
+          termsCell.style.paddingBottom = "8px";
+        }
+      }
+
+      // Force layout recalculation
+      await new Promise((r) => setTimeout(r, 150));
+      const notesReflow = clonedEl.querySelector('[data-pdf-footer-block="notes"]');
+      if (notesReflow) {
+        notesReflow.style.minHeight = `${notesReflow.scrollHeight + 2}px`;
+      }
+      clonedEl.style.height = "auto";
+      clonedEl.style.minHeight = "0";
+
+      const rootRect = clonedEl.getBoundingClientRect();
+
+      // Keep Terms/Bank/Notes as captured HTML (full text). Redraw signature only.
+      clonedEl
+        .querySelectorAll("[data-pdf-signature-for]")
+        .forEach((block) => {
+          block.style.color = "rgb(255,255,255)";
+          block.style.webkitTextFillColor = "rgb(255,255,255)";
+          block.querySelectorAll("*").forEach((child) => {
+            child.style.color = "rgb(255,255,255)";
+            child.style.webkitTextFillColor = "rgb(255,255,255)";
+          });
+        });
+
+      // Measure the FULL height of the off-screen cloned element after reflow
+      const captureWidth = clonedEl.scrollWidth || 794;
+      const captureHeight = clonedEl.scrollHeight || clonedEl.offsetHeight;
+
+      const canvas = await html2canvas(clonedEl, {
+        scale: 3,
+        useCORS: true,
+        allowTaint: false,
+        foreignObjectRendering: false,
+        backgroundColor: "#ffffff",
+        logging: false,
+        imageTimeout: 15000,
+        width: captureWidth,
+        height: captureHeight,
+        windowWidth: captureWidth,
+        windowHeight: captureHeight,
+        x: 0,
+        y: 0,
+      });
+
+      const imgData = canvas.toDataURL("image/png", 1.0);
+
+      const imgProps = new jsPDF({ unit: "mm" }).getImageProperties(imgData);
+      const pageMarginMm = 6;
+      const contentWidthMm = INVOICE_PDF_WIDTH_MM - pageMarginMm * 2;
+      const scaleWidth = contentWidthMm / imgProps.width;
+      const naturalHmm = imgProps.height * scaleWidth;
+      const pageHeightMm = Math.ceil(
+        Math.max(
+          INVOICE_PDF_MIN_HEIGHT_MM,
+          naturalHmm + pageMarginMm * 2,
+        ),
+      );
+
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: [INVOICE_PDF_WIDTH_MM, pageHeightMm],
+        compress: true,
+      });
+
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const drawW = contentWidthMm;
+      const drawH = naturalHmm;
+      const x = pageMarginMm;
+      const y = pageMarginMm;
+      pdf.addImage(imgData, "PNG", x, y, drawW, drawH, undefined, "FAST");
+
+      const ptToMm = 0.352778;
+      const pageLocalY = (absTopMm) => absTopMm;
+      const toBlockRect = (box) => ({
+        left: x + drawW * box.relX,
+        top: y + drawH * box.relY,
+        width: drawW * box.relW,
+        height: drawH * box.relH,
+      });
+      const onPageRect = (rect) => ({
+        ...rect,
+        top: pageLocalY(rect.top),
+      });
+      const wipeBlock = (rect, maxRight = null, extraPad = {}) => {
+        const r = onPageRect(rect);
+        const sidePad = 0.4;
+        const topPad = extraPad.top ?? sidePad;
+        const bottomPad = extraPad.bottom ?? sidePad;
+        let right = r.left + r.width;
+        if (maxRight != null) right = Math.min(right, maxRight);
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(
+          Math.max(0, r.left - sidePad),
+          Math.max(0, r.top - topPad),
+          Math.max(0, right - r.left + sidePad * 2),
+          r.height + topPad + bottomPad,
+          "F",
+        );
+      };
+      const drawFlowParagraphs = ({
+        rect,
+        paragraphs,
+        startFontSize = 7,
+        title,
+        titleFontSize = 7.5,
+        maxRight = null,
+        wipeTopPad = 0.4,
+        titleTopInset = 0.9,
+        clipToRectHeight = false,
+        lineHeightFactor = 1.45,
+        paragraphGapFactor = 0.35,
+      }) => {
+        rect = onPageRect(rect);
+        const textWidth = Math.max(rect.width - 1, 20);
+        const paragraphList = paragraphs;
+        const lineHeight = startFontSize * ptToMm * lineHeightFactor;
+        const paragraphGap = startFontSize * ptToMm * paragraphGapFactor;
+        let estimatedHeight = startFontSize * ptToMm * titleTopInset;
+        if (title) estimatedHeight += titleFontSize * ptToMm * 1.55;
+        for (const paragraph of paragraphList) {
+          const wrapped = pdf.splitTextToSize(paragraph, textWidth);
+          estimatedHeight += wrapped.length * lineHeight + paragraphGap;
+        }
+        const wipeHeight = clipToRectHeight
+          ? Math.max(rect.height - 0.3, 4)
+          : Math.max(rect.height, estimatedHeight + 1.5);
+        wipeBlock(
+          { ...rect, height: wipeHeight },
+          maxRight,
+          { top: wipeTopPad, bottom: clipToRectHeight ? 0.15 : 0.8 },
+        );
+        pdf.setTextColor(0, 0, 0);
+        let cursorY = rect.top + startFontSize * ptToMm * titleTopInset;
+        const maxY = rect.top + rect.height;
+        if (title) {
+          pdf.setFont("helvetica", "bold");
+          pdf.setFontSize(titleFontSize);
+          if (!clipToRectHeight || cursorY <= maxY) {
+            pdf.text(title, rect.left, cursorY);
+          }
+          cursorY += titleFontSize * ptToMm * 1.5;
+        }
+        for (const paragraph of paragraphList) {
+          pdf.setFont("helvetica", "normal");
+          pdf.setFontSize(startFontSize);
+          const wrapped = pdf.splitTextToSize(paragraph, textWidth);
+          for (const line of wrapped) {
+            if (clipToRectHeight && cursorY > maxY) break;
+            pdf.text(line, rect.left, cursorY);
+            cursorY += lineHeight;
+          }
+          cursorY += paragraphGap;
+        }
+      };
+
+      const pageRight = x + drawW - 1.5;
+
+      const borderedRootEl = clonedEl.querySelector("[data-invoice-border-root]");
+      if (borderedRootEl && rootRect.width > 0 && rootRect.height > 0) {
+        const br = borderedRootEl.getBoundingClientRect();
+        const outerBox = onPageRect({
+          left: x + (drawW * (br.left - rootRect.left)) / rootRect.width,
+          top: y + (drawH * (br.top - rootRect.top)) / rootRect.height,
+          width: (drawW * br.width) / rootRect.width,
+          height: (drawH * br.height) / rootRect.height,
+        });
+        const edgePad = 0.2;
+        pdf.setDrawColor(0, 0, 0);
+        pdf.setLineWidth(0.35);
+        pdf.rect(
+          outerBox.left + edgePad,
+          outerBox.top + edgePad,
+          Math.max(outerBox.width - edgePad * 2, 4),
+          Math.max(outerBox.height - edgePad * 2, 4),
+          "S",
+        );
+      }
+
+      const signatureForEl = clonedEl.querySelector("[data-pdf-signature-for]");
+      if (signatureForEl && rootRect.width > 0) {
+        const sr = signatureForEl.getBoundingClientRect();
+        const sigRect = {
+          left: x + (drawW * (sr.left - rootRect.left)) / rootRect.width,
+          top: y + (drawH * (sr.top - rootRect.top)) / rootRect.height,
+          width: (drawW * sr.width) / rootRect.width,
+          height: (drawH * sr.height) / rootRect.height,
+        };
+        const sigText = `for ${data.company.name}`;
+        pdf.setFont("helvetica", "normal");
+        const sigFontSize = INVOICE_SIGNATURE_FOR_PT;
+        pdf.setFontSize(sigFontSize);
+        pdf.setTextColor(0, 0, 0);
+        const sigOnPage = onPageRect(sigRect);
+        wipeBlock(sigRect, pageRight, { top: 0.4, bottom: 0.5 });
+        pdf.text(
+          sigText,
+          sigOnPage.left + sigOnPage.width,
+          sigOnPage.top + sigFontSize * ptToMm,
+          { align: "right" },
+        );
+      }
+
+      const pdfFileName = invoice.type === "performa"
+        ? `Performa-Invoice-${data.invoice.number.replace(/[/\\]/g, "_")}.pdf`
+        : `Invoice-${data.invoice.number.replace(/[/\\]/g, "_")}.pdf`;
+      pdf.save(pdfFileName);
+
+    } catch (err) {
+      console.error("PDF generation failed:", err);
+      alert("Failed to generate PDF. Check console for details.");
+    } finally {
+      if (offscreenWrapper && offscreenWrapper.parentNode) {
+        document.body.removeChild(offscreenWrapper);
+      }
+      if (loadingDiv && loadingDiv.parentNode) {
+        document.body.removeChild(loadingDiv);
+      }
+    }
+  };
+
+  // Calculate totals for display
+  
+  
+
+  const calculateSubtotal = () => {
+    return data.items.reduce(
+      (sum, item) => sum + parseFloat(item.amount || 0),
+      0,
+    );
+  };
+
+  const formatCurrency = (value) => {
+    if (!value) return "0.00";
+    return parseFloat(value).toLocaleString("en-IN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
+
+  // to add in single hsn calc
+  const buildHSNSummary = () => {
+    const map = {};
+
+    data.items.forEach((item) => {
+      const hsn = item.hsn || "NA";
+
+      if (!map[hsn]) {
+        map[hsn] = {
+          hsn,
+          taxableValue: 0,
+          cgst: 0,
+          sgst: 0,
+          igst: 0,
+          cgstPercent: item.cgst_percent,
+          sgstPercent: item.sgst_percent,
+          igstPercent: item.igst_percent,
+        };
+      }
+
+      map[hsn].taxableValue += parseFloat(item.amount || 0);
+      map[hsn].cgst += parseFloat(item.cgst_amount || 0);
+      map[hsn].sgst += parseFloat(item.sgst_amount || 0);
+      map[hsn].igst += parseFloat(item.igst_amount || 0);
+    });
+
+    return Object.values(map);
+  };
+
+  const hsnSummary = buildHSNSummary();
+
+  const formatInvoiceTaxRate = (raw) => {
+    const n = parseFloat(String(raw ?? "").replace(/,/g, ""));
+    return Number.isFinite(n) ? n.toFixed(2) : "0.00";
+  };
+
+  const taxSummaryThStyle = {
+    border: "1px solid #000",
+    padding: "6px 5px",
+    textAlign: "center",
+    lineHeight: "1.45",
+    verticalAlign: "middle",
+    fontWeight: "bold",
+    backgroundColor: "#f0f0f0",
+  };
+  const taxSummaryTdStyle = {
+    border: "1px solid #000",
+    padding: "6px 5px",
+    textAlign: "center",
+    lineHeight: "1.45",
+    verticalAlign: "middle",
+  };
+
+  // Function to render tax rows based on available tax data
+  const renderTaxRows = () => {
+    const rows = [];
+    const trx = formatInvoiceTaxRate(data.taxRate);
+
+    if (parseFloat(itemTotals.totalIGST) > 0) {
+      rows.push(
+        <tr key="igst">
+          <td
+            colSpan="5"
+            style={{
+              border: "1px solid #000",
+              padding: "4px",
+              textAlign: "right",
+              fontWeight: "bold",
+            }}
+          >
+            Output IGST {trx}%
+          </td>
+          <td
+            style={{
+              border: "1px solid #000",
+              padding: "4px",
+              textAlign: "right",
+            }}
+          >
+            {data.igst}
+          </td>
+        </tr>,
+      );
+    } else {
+      if (parseFloat(itemTotals.totalCGST) > 0) {
+        rows.push(
+          <tr key="cgst">
+            <td
+              colSpan="5"
+              style={{
+                border: "1px solid #000",
+                padding: "4px",
+                textAlign: "right",
+                fontWeight: "bold",
+              }}
+            >
+              Output CGST {trx}%
+            </td>
+            <td
+              style={{
+                border: "1px solid #000",
+                padding: "4px",
+                textAlign: "right",
+              }}
+            >
+              {data.cgst}
+            </td>
+          </tr>,
+        );
+      }
+
+      if (parseFloat(itemTotals.totalSGST) > 0) {
+        rows.push(
+          <tr key="sgst">
+            <td
+              colSpan="5"
+              style={{
+                border: "1px solid #000",
+                padding: "4px",
+                textAlign: "right",
+                fontWeight: "bold",
+              }}
+            >
+              Output SGST {trx}%
+            </td>
+            <td
+              style={{
+                border: "1px solid #000",
+                padding: "4px",
+                textAlign: "right",
+              }}
+            >
+              {data.sgst}
+            </td>
+          </tr>,
+        );
+      }
+    }
+
+    return rows;
+  };
+
+  return (
+    <>
+      <div
+        style={{
+          display: "flex",
+          gap: "10px",
+          padding: "10px",
+          justifyContent: "flex-end",
+        }}
+      >
+        <button
+          onClick={generatePDF}
+          style={{
+            padding: "10px 20px",
+            backgroundColor: "#2196F3",
+            color: "white",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+          }}
+        >
+          Download PDF
+        </button>
+        {/* <DownloadPDFButton invoiceData={data} /> */}
+      </div>
+      <div
+        ref={containerRef}
+        data-pdf-capture-root="true"
+        style={{
+          fontFamily: "Arial, sans-serif",
+          fontSize: "11px",
+          maxWidth: "210mm",
+          margin: "0 auto",
+          padding: "0",
+          background: "#fff",
+          backgroundColor: "#fff",
+        }}
+      >
+        {/* Title outside invoice border (matches printed tax invoice layout) */}
+        <div
+          style={{
+            textAlign: "center",
+            marginBottom: "8px",
+            paddingBottom: "2px",
+          }}
+        >
+          <h1
+            style={{
+              margin: "0",
+              fontSize: "15px",
+              fontWeight: 400,
+              letterSpacing: "0.02em",
+              color: "#000",
+            }}
+          >
+            {invoiceTypeLabel}
+          </h1>
+        </div>
+        <div
+          data-invoice-border-root="true"
+          style={{
+            position: "relative",
+            padding: "6mm",
+            background: "#fff",
+            backgroundColor: "#fff",
+            border: "1px solid #000",
+            boxSizing: "border-box",
+          }}
+        >
+        {showCancelledWatermark ? (
+          <div
+            aria-hidden
+            data-invoice-cancelled-watermark="true"
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: "none",
+              zIndex: 50,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: "42%",
+                transform: "translate(-50%, -50%) rotate(-35deg)",
+                fontSize: "64px",
+                fontWeight: 800,
+                color: "rgba(220, 38, 38, 0.45)",
+                letterSpacing: "0.25em",
+                textTransform: "uppercase",
+                userSelect: "none",
+                whiteSpace: "nowrap",
+                textShadow: "0 0 2px rgba(255,255,255,0.8)",
+                border: "5px solid rgba(220, 38, 38, 0.4)",
+                padding: "12px 32px",
+                background: "rgba(254, 226, 226, 0.15)",
+              }}
+            >
+              CANCELLED
+            </div>
+          </div>
+        ) : null}
+        {/* Logo flush left; company block left of row but lines centre-aligned within block */}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            tableLayout: "fixed",
+            border: "1px solid #000",
+            borderBottom: "0px",
+            overflow: "visible",
+          }}
+        >
+          <tbody>
+            <tr>
+              <td
+                colSpan={2}
+                style={{
+                  verticalAlign: "top",
+                  padding: "16px 24px 14px 4px",
+                  minHeight: "128px",
+                  overflow: "visible",
+                  boxSizing: "border-box",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "row",
+                    alignItems: "flex-start",
+                    gap: "120px",
+                    width: "100%",
+                    boxSizing: "border-box",
+                  }}
+                >
+                  <div style={{ flexShrink: 0, width: 110, marginTop: "14px" }}>
+                    {logoSrc ? (
+                      <img
+                        src={logoSrc}
+                        style={{
+                          width: 110,
+                          height: "auto",
+                          display: "block",
+                        }}
+                        alt="logo"
+                        onError={handleLogoError}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 110,
+                          minHeight: 48,
+                          border: "1px solid #ddd",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "#c62828",
+                          fontWeight: 700,
+                          fontSize: 10,
+                        }}
+                      >
+                        DYNACLEAN
+                      </div>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      display: "flex",
+                      justifyContent: "flex-start",
+                      fontFamily: "Arial, Helvetica, sans-serif",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "inline-block",
+                        textAlign: "center",
+                        maxWidth: "520px",
+                      }}
+                    >
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: "17px",
+                      lineHeight: 1.3,
+                      marginBottom: "10px",
+                      color: "#000",
+                    }}
+                  >
+                    {INVOICE_LETTERHEAD.name}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      lineHeight: 1.45,
+                      marginBottom: "3px",
+                      color: "#000",
+                      fontWeight: 400,
+                    }}
+                  >
+                    {INVOICE_LETTERHEAD.addressLine1}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      lineHeight: 1.45,
+                      marginBottom: "5px",
+                      color: "#000",
+                      fontWeight: 400,
+                    }}
+                  >
+                    {INVOICE_LETTERHEAD.addressLine2}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      lineHeight: 1.45,
+                      marginBottom: "3px",
+                      color: "#000",
+                      fontWeight: 400,
+                    }}
+                  >
+                    Ph: {INVOICE_LETTERHEAD.phone}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      lineHeight: 1.45,
+                      marginBottom: "3px",
+                      color: "#000",
+                      fontWeight: 400,
+                    }}
+                  >
+                    GST: {INVOICE_LETTERHEAD.gstin}, State: {INVOICE_LETTERHEAD.state}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      lineHeight: 1.45,
+                      color: "#000",
+                      fontWeight: 400,
+                    }}
+                  >
+                    CIN: {INVOICE_LETTERHEAD.cin}
+                  </div>
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        {/* Invoice Info Table */}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            fontSize: "10px",
+          }}
+        >
+          <tbody>
+            <tr>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  width: "33%",
+                  fontWeight: "bold",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                {invoiceTypeLabel} No. : <span style={{
+                  fontWeight: "normal",
+                }}>{data.invoice.number}</span>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  width: "33%",
+                  fontWeight: "bold",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                {invoiceTypeLabel} Date : <span style={{
+                  fontWeight: "normal",
+                }}>{data.invoice.invoiceDate}</span>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  width: "34%",
+                  fontWeight: "bold",
+                  borderBottom: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                Due Date : <span style={{
+                  fontWeight: "normal",
+                }}>{data.invoice.dueDate}</span>
+              </td>
+            </tr>
+           
+            <tr>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  width: "33%",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                  verticalAlign: "top",
+                  textAlign: "left",
+                }}
+              >
+                <div style={{ fontWeight: "bold", lineHeight: "1.3" }}>
+                  Reference No. :{" "}
+                  <span style={{ fontWeight: "normal" }}>
+                    {data.invoice.referenceNo || "-"}
+                  </span>
+                </div>
+                <div style={{ fontWeight: "bold", marginTop: "6px", lineHeight: "1.3" }}>
+                  Date :{" "}
+                  <span style={{ fontWeight: "normal" }}>
+                    {data.invoice.referenceDate || "-"}
+                  </span>
+                </div>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  width: "33%",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                  verticalAlign: "top",
+                  textAlign: "left",
+                }}
+              >
+                <div style={{ fontWeight: "bold", lineHeight: "1.3" }}>
+                  Buyer's Order No. :
+                </div>
+                <div style={{ fontWeight: "normal", marginTop: "4px", lineHeight: "1.3" }}>
+                  {data.invoice.buyersOrderNo || "-"}
+                </div>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  width: "34%",
+                  borderBottom: "0px",
+                  verticalAlign: "top",
+                  textAlign: "left",
+                }}
+              >
+                <b>Order Date : <span style={{
+                  fontWeight: "normal",
+                }}>{data.invoice.orderDate}</span></b>
+              </td>
+            </tr>
+           
+            <tr>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>e-Way Bill No. : <span style={{
+                  fontWeight: "normal",
+                }}>{data.invoice.eWayBill}</span></b>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>Payment Status : <span style={{
+                  fontWeight: "normal",
+                }}>{data.paymentInfo.status}</span></b>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  borderBottom: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>Balance Amount : <span style={{
+                  fontWeight: "normal",
+                }}>{data.paymentInfo.balanceAmount}</span></b>
+              </td>
+            </tr>
+            <tr>
+              <td
+                colSpan={3}
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px 8px 8px 8px",
+                  borderBottom: "0px",
+                  textAlign: "left",
+                  verticalAlign: "top",
+                }}
+              >
+                <b>Delivery Challan No. :{" "}
+                <span style={{ fontWeight: "normal" }}>
+                  {data.invoice.deliveryChallanNo || "-"}
+                </span></b>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        {/* Buyer, state/amount, notes — single grid (full-width notes row) */}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            fontSize: "10px",
+            tableLayout: "fixed",
+          }}
+        >
+          <tbody>
+            <tr>
+              {/* BUYER COLUMN */}
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  width: "50%",
+                  verticalAlign: "top",
+                  wordBreak: "break-word",
+                  overflowWrap: "break-word",
+                  borderRight: "0px",
+                  whiteSpace: "normal",
+                  lineHeight: "1.5",
+                }}
+              >
+  <div style={{ marginBottom: "4px" }}><b>Buyer (Bill To) : {data.buyer.name}</b></div>
+
+  <div style={{ marginBottom: "3px" }}><b>Address: </b>{data.buyer.address}</div>
+
+  <div style={{ marginBottom: "3px" }}>
+    <b>GSTIN: </b>{data.buyer.gstin || "N/A"}
+    {"   "}
+    <b>State: </b>{data.buyer.state}
+  </div>
+
+  <div style={{ marginBottom: "3px" }}>
+    <b>Place of Supply: </b>{data.buyer.placeOfSupply}
+    {"   "}
+    <b>Contact: </b>{data.buyer.contactPerson} ({data.buyer.phone})
+  </div>
+
+  <div style={{ marginBottom: "1px" }}><b>Email: </b>{data.buyer.email}</div>
+</td>
+
+
+
+              {/* CONSIGNEE COLUMN */}
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  width: "50%",
+                  lineHeight: "1.5",
+                  verticalAlign: "top",
+                  wordBreak: "break-word",
+                  overflowWrap: "break-word",
+                  whiteSpace: "normal",
+                }}
+              >
+  <div style={{ marginBottom: "4px" }}><b>Consignee (Ship To) : {data.consignee.name}</b></div>
+
+  <div style={{ marginBottom: "3px" }}><b>Address: </b>{data.consignee.address}</div>
+
+  <div style={{ marginBottom: "3px" }}><b>GSTIN: </b>{data.consignee.gstin || "N/A"}</div>
+
+  <div style={{ marginBottom: "3px" }}><b>State: </b>{data.consignee.state}</div>
+
+  <div style={{ marginBottom: "3px" }}><b>Contact: </b>{data.consignee.contactPerson} ({data.consignee.phone})</div>
+              </td>
+            </tr>
+            <tr>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  width: "50%",
+                  fontWeight: "bold",
+                  borderRight: "0px",
+                }}
+              >
+                State Code :{" "}
+                <span style={{ fontWeight: "normal" }}>
+                  {data.invoice.stateCode || ""}
+                </span>
+              </td>
+              <td
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  width: "50%",
+                  fontWeight: "bold",
+                }}
+              >
+                Amount Paid :{" "}
+                <span style={{ fontWeight: "normal" }}>
+                  ₹{data.paymentInfo.amountPaid || "0.00"}
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        {/* Items Table */}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            marginBottom: "10px",
+            fontSize: "10px",
+            marginTop: "0px",
+          }}
+        >
+          <thead>
+            <tr style={{ backgroundColor: "#f0f0f0" }}>
+              <th
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  textAlign: "left",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                }}
+              >
+                Sl No.
+              </th>
+              <th
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  textAlign: "left",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                }}
+              >
+                Description of Goods
+              </th>
+              <th
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  textAlign: "left",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                }}
+              >
+                HSN/SAC
+              </th>
+              <th
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  textAlign: "center",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                }}
+              >
+                Quantity
+              </th>
+              <th
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  textAlign: "right",
+                  borderBottom: "0px",
+                  borderRight: "0px",
+                }}
+              >
+                Rate
+              </th>
+              <th
+                style={{
+                  border: "1px solid #000",
+                  padding: "4px",
+                  textAlign: "right",
+                  borderBottom: "0px",
+                }}
+              >
+                Amount
+              </th>
+            </tr>
+          </thead>
+       <tbody>
+  {data.items.map((item) => (
+    <tr key={item.sr_no}>
+      <td
+        style={{
+          border: "1px solid #000",
+          padding: "6px",                 // increased
+          borderBottom: "0px",
+          borderRight: "0px",
+          verticalAlign: "top",
+          lineHeight: "1.4",
+        }}
+      >
+        {item.sr_no}
+      </td>
+
+      <td
+        style={{
+          border: "1px solid #000",
+          padding: "3px 6px 6px 6px",   // increased padding
+          borderBottom: "0px",
+          borderRight: "0px",
+          verticalAlign: "top",           // important
+          wordBreak: "break-word",
+          whiteSpace: "normal",
+          lineHeight: "1.4",
+        }}
+      >
+        <div style={{ fontWeight: "bold",
+    lineHeight: "1.1",      // important
+    paddingBottom: "4px",   // prevents bottom cutting
+    display: "inline-block" }}>
+          {item.description}
+        </div>
+
+        {item.fullDescription && (
+          <div
+            style={{
+              fontSize: "8px",
+              lineHeight: "1.3",
+              wordBreak: "break-word",
+              whiteSpace: "normal",
+            }}
+          >
+            {item.fullDescription}
+          </div>
+        )}
+      </td>
+
+      <td
+        style={{
+          border: "1px solid #000",
+          padding: "6px",
+          borderBottom: "0px",
+          borderRight: "0px",
+          verticalAlign: "top",
+          lineHeight: "1.4",
+        }}
+      >
+        {item.hsn}
+      </td>
+
+      <td
+        style={{
+          border: "1px solid #000",
+          padding: "6px",
+          textAlign: "center",
+          borderBottom: "0px",
+          borderRight: "0px",
+          verticalAlign: "top",
+          lineHeight: "1.4",
+        }}
+      >
+        {item.quantity}
+      </td>
+
+      <td
+        style={{
+          border: "1px solid #000",
+          padding: "6px",
+          textAlign: "right",
+          borderBottom: "0px",
+          borderRight: "0px",
+          verticalAlign: "top",
+          lineHeight: "1.4",
+        }}
+      >
+        {formatCurrency(item.rate)}
+      </td>
+
+      <td
+        style={{
+          border: "1px solid #000",
+          padding: "6px",
+          textAlign: "right",
+          borderBottom: "0px",
+          verticalAlign: "top",
+          lineHeight: "1.4",
+        }}
+      >
+        {formatCurrency(item.amount)}
+      </td>
+    </tr>
+  ))}
+
+  {renderTaxRows()}
+
+  <tr>
+    <td
+      colSpan="3"
+      style={{
+        border: "1px solid #000",
+        padding: "6px",
+        fontWeight: "bold",
+        borderRight: "0px",
+        lineHeight: "1.4",
+      }}
+    >
+      Total
+    </td>
+
+    <td
+      style={{
+        border: "1px solid #000",
+        padding: "6px",
+        textAlign: "center",
+        fontWeight: "bold",
+        borderRight: "0px",
+        lineHeight: "1.4",
+      }}
+    >
+      {itemTotals.totalQuantity}
+    </td>
+
+    <td
+      style={{
+        border: "1px solid #000",
+        padding: "6px",
+        textAlign: "right",
+        fontWeight: "bold",
+        borderRight: "0px",
+        lineHeight: "1.4",
+      }}
+    >
+      ₹
+    </td>
+
+    <td
+      style={{
+        border: "1px solid #000",
+        padding: "6px",
+        textAlign: "right",
+        fontWeight: "bold",
+        lineHeight: "1.4",
+      }}
+    >
+      {data.total}
+    </td>
+  </tr>
+</tbody>
+
+        </table>
+
+        {/* Amount in Words */}
+        <div style={{ marginBottom: "8px", fontSize: "9px" }}>
+          <div style={{ fontWeight: "bold", marginBottom: "2px" }}>
+            Amount Chargeable (in words) E. & O.E
+          </div>
+          <br />
+          <strong style={{ fontSize: INVOICE_INR_WORDS_PX, fontWeight: "bold" }}>
+            INR- {numberToWords(data.total)}
+          </strong>
+        </div>
+
+        {/* Tax Summary Table */}
+        <table
+          data-invoice-tax-summary
+          style={{
+            width: "100%",
+            borderCollapse: "separate",
+            borderSpacing: 0,
+            marginBottom: "10px",
+            fontSize: "9px",
+          }}
+        >
+          <thead>
+            <tr>
+              <th style={taxSummaryThStyle}>HSN/SAC</th>
+              <th style={taxSummaryThStyle}>Taxable Value</th>
+              {parseFloat(itemTotals.totalIGST) > 0 ? (
+                <>
+                  <th style={taxSummaryThStyle}>IGST</th>
+                  <th style={taxSummaryThStyle}>Rate</th>
+                  <th style={taxSummaryThStyle}>Amount</th>
+                </>
+              ) : (
+                <>
+                  <th style={taxSummaryThStyle}>CGST</th>
+                  <th style={taxSummaryThStyle}>Rate</th>
+                  <th style={taxSummaryThStyle}>Amount</th>
+                  <th style={taxSummaryThStyle}>SGST/UTGST</th>
+                  <th style={taxSummaryThStyle}>Rate</th>
+                  <th style={taxSummaryThStyle}>Amount</th>
+                </>
+              )}
+              <th style={taxSummaryThStyle}>Total Tax Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {hsnSummary.map((row, idx) => (
+              <tr key={idx}>
+                <td style={taxSummaryTdStyle}>{row.hsn}</td>
+                <td style={taxSummaryTdStyle}>
+                  {formatCurrency(row.taxableValue)}
+                </td>
+                {parseFloat(itemTotals.totalIGST) > 0 ? (
+                  <>
+                    <td style={taxSummaryTdStyle}>IGST</td>
+                    <td style={taxSummaryTdStyle}>
+                      {formatInvoiceTaxRate(row.igstPercent)}%
+                    </td>
+                    <td style={taxSummaryTdStyle}>
+                      {formatCurrency(row.igst)}
+                    </td>
+                  </>
+                ) : (
+                  <>
+                    <td style={taxSummaryTdStyle}>CGST</td>
+                    <td style={taxSummaryTdStyle}>
+                      {formatInvoiceTaxRate(row.cgstPercent)}%
+                    </td>
+                    <td style={taxSummaryTdStyle}>
+                      {formatCurrency(row.cgst)}
+                    </td>
+                    <td style={taxSummaryTdStyle}>SGST/UTGST</td>
+                    <td style={taxSummaryTdStyle}>
+                      {formatInvoiceTaxRate(row.sgstPercent)}%
+                    </td>
+                    <td style={taxSummaryTdStyle}>
+                      {formatCurrency(row.sgst)}
+                    </td>
+                  </>
+                )}
+                <td style={taxSummaryTdStyle}>
+                  {parseFloat(itemTotals.totalIGST) > 0
+                    ? formatCurrency(row.igst)
+                    : formatCurrency(row.cgst + row.sgst)}
+                </td>
+              </tr>
+            ))}
+
+            <tr style={{ fontWeight: "bold" }}>
+              <td style={taxSummaryTdStyle}>Total</td>
+              <td style={taxSummaryTdStyle}>{data.subtotal}</td>
+              {parseFloat(itemTotals.totalIGST) > 0 ? (
+                <>
+                  <td colSpan={2} style={taxSummaryTdStyle} />
+                  <td style={taxSummaryTdStyle}>{data.igst}</td>
+                </>
+              ) : (
+                <>
+                  <td colSpan={2} style={taxSummaryTdStyle} />
+                  <td style={taxSummaryTdStyle}>{data.cgst}</td>
+                  <td colSpan={2} style={taxSummaryTdStyle} />
+                  <td style={taxSummaryTdStyle}>{data.sgst}</td>
+                </>
+              )}
+              <td style={taxSummaryTdStyle}>{data.taxAmount}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        {/* Tax Amount in Words — same size as Amount Chargeable INR, one line */}
+        <div
+          style={{
+            marginBottom: "6px",
+            paddingBottom: "0px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            gap: "12px",
+          }}
+        >
+          <strong
+            style={{
+              fontSize: INVOICE_INR_WORDS_PX,
+              fontWeight: "bold",
+              lineHeight: INVOICE_BODY_LINE_HEIGHT,
+            }}
+          >
+            Tax Amount (in words) : INR- {numberToWords(data.taxAmount)}
+          </strong>
+          {data.roundOff !== 0 && (
+            <strong style={{ fontSize: INVOICE_INR_WORDS_PX, whiteSpace: "nowrap" }}>
+              Round Off: {data.roundOff > 0 ? `+₹${data.roundOff}` : `-₹${Math.abs(data.roundOff)}`}
+            </strong>
+          )}
+        </div>
+
+        {/* Terms & Bank Details */}
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "separate",
+            borderSpacing: 0,
+            tableLayout: "fixed",
+            marginTop: "0px",
+            marginBottom: "0px",
+            height: "auto",
+          }}
+        >
+          <tbody>
+            <tr>
+              <td
+                data-pdf-footer-block="terms"
+                style={{
+                  width: "58%",
+                  verticalAlign: "top",
+                  paddingRight: "16px",
+                  paddingTop: "0px",
+                  paddingBottom: (data.notes || "").trim() ? "8px" : "2px",
+                  fontSize: INVOICE_BODY_TEXT_PX,
+                  lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: "bold",
+                    marginBottom: "4px",
+                    marginTop: "2px",
+                    fontSize: INVOICE_BODY_TEXT_PX,
+                    lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                  }}
+                >
+                  Terms & Condition
+                </div>
+                {data.terms.length > 0 ? (
+                  data.terms.map((term, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        marginBottom:
+                          index === data.terms.length - 1 ? "4px" : "4px",
+                        lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                      }}
+                    >
+                      {term}
+                    </div>
+                  ))
+                ) : (
+                  <div>No terms and conditions specified.</div>
+                )}
+              </td>
+              <td
+                data-pdf-footer-block="bank"
+                style={{
+                  width: "42%",
+                  verticalAlign: "top",
+                  paddingLeft: "8px",
+                  paddingBottom: "2px",
+                  fontSize: INVOICE_BODY_TEXT_PX,
+                  lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                }}
+              >
+                <div style={{ width: "100%" }}>
+                  <div
+                    style={{
+                      fontWeight: "bold",
+                      marginBottom: "4px",
+                      fontSize: INVOICE_BODY_TEXT_PX,
+                      lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                    }}
+                  >
+                    Company&apos;s Bank Details
+                  </div>
+                  <div style={{ marginBottom: "2px", wordBreak: "break-word" }}>
+                    A/C Holder Name : {data.bank.accountHolderName}
+                  </div>
+                  <div style={{ marginBottom: "2px" }}>
+                    Bank Name : {data.bank.name}
+                  </div>
+                  <div style={{ marginBottom: "2px" }}>
+                    A/c No. : {data.bank.accountNo}
+                  </div>
+                  <div>Branch &amp; IFSC Code: {data.bank.IFSC}</div>
+                </div>
+              </td>
+            </tr>
+            {(data.notes || "").trim() ? (
+              <tr>
+                <td
+                  colSpan={2}
+                  style={{
+                    paddingTop: "10px",
+                    paddingBottom: "0px",
+                    verticalAlign: "top",
+                  }}
+                >
+                  <div
+                    data-pdf-footer-block="notes"
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      border: "1px solid #000",
+                      padding: "4px 5px 6px",
+                      marginTop: "2px",
+                      marginBottom: "6px",
+                      overflow: "visible",
+                      fontSize: INVOICE_BODY_TEXT_PX,
+                      lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                    }}
+                  >
+                    <div
+                      data-pdf-notes-label
+                      style={{
+                        fontWeight: "bold",
+                        marginBottom: "2px",
+                        marginTop: "0px",
+                        fontSize: INVOICE_BODY_TEXT_PX,
+                        lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                      }}
+                    >
+                      Notes :
+                    </div>
+                    <div
+                      data-pdf-notes-body
+                      style={{
+                        fontWeight: "normal",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        overflowWrap: "break-word",
+                        fontSize: INVOICE_BODY_TEXT_PX,
+                        lineHeight: INVOICE_BODY_LINE_HEIGHT,
+                      }}
+                    >
+                      {data.notes}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+
+        {/* Signature */}
+       <div
+  style={{
+    textAlign: "right",
+    marginTop: (data.notes || "").trim() ? "8px" : "12px",
+    fontSize: INVOICE_BODY_TEXT_PX,
+  }}
+>
+  <div
+    data-pdf-signature-for
+    style={{
+      whiteSpace: "nowrap",
+      fontSize: INVOICE_SIGNATURE_FOR_PX,
+      lineHeight: INVOICE_BODY_LINE_HEIGHT,
+    }}
+  >
+    for {data.company.name}
+  </div>
+
+  {/* Signature Image */}
+  <div
+    style={{
+      marginTop: "20px",
+      display: "flex",
+      justifyContent: "flex-end",
+    }}
+  >
+    {signatureSrc ? (
+      <img
+        src={signatureSrc}
+        alt=""
+        onError={handleSignatureError}
+        style={{
+          height: "60px",
+          width: "120px",
+          objectFit: "contain",
+        }}
+      />
+    ) : null}
+  </div>
+
+  {/* Signatory Text */}
+  <div
+    style={{
+      marginTop: "5px",
+      marginRight: "12px",
+      fontWeight: "bold",
+    }}
+  >
+    Authorised Signatory
+  </div>
+</div>
+
+
+
+
+
+        {/* Footer */}
+        <div
+          style={{
+            textAlign: "center",
+            marginTop: "18px",
+            fontSize: "8px",
+            fontStyle: "italic",
+          }}
+        >
+          *This is a Computer Generated Invoice*
+        </div>
+        </div>
+      </div>
+      {/* <div style={{ width: "80%", marginTop: "20px" }}>
+        <InvoicePDFPreview invoiceData={data} />
+      </div> */}
+    </>
+  );
+};
+
+export default NewInvoice;

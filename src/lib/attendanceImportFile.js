@@ -1,0 +1,217 @@
+import ExcelJS from "exceljs";
+import {
+  normalizeImportHeaderCell,
+  disambiguatePairHeaders,
+  parseImportDateToYmd,
+} from "@/lib/attendanceImportParse";
+
+export const IMPORT_TIME_FIELDS = [
+  "checkin_time",
+  "checkout_time",
+  "break_morning_start",
+  "break_morning_end",
+  "break_lunch_start",
+  "break_lunch_end",
+  "break_evening_start",
+  "break_evening_end",
+];
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+/** Excel time-only serial (fraction of day) → HH:mm:ss wall clock (no TZ shift). */
+function excelDayFractionToHms(fraction) {
+  const f = ((Number(fraction) % 1) + 1) % 1;
+  const totalSec = Math.round(f * 86400);
+  const h = Math.floor(totalSec / 3600) % 24;
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+}
+
+/** ExcelJS time cells use 1899/1900 phantom dates; wall clock is in UTC fields. */
+function isExcelPhantomDate(d) {
+  const y = d.getFullYear();
+  return y === 1899 || y === 1900;
+}
+
+function dateCellToYmd(d) {
+  if (isExcelPhantomDate(d)) {
+    const y = d.getUTCFullYear();
+    const m = d.getUTCMonth() + 1;
+    const day = d.getUTCDate();
+    return `${y}-${pad2(m)}-${pad2(day)}`;
+  }
+  return d.toLocaleDateString("en-CA");
+}
+
+function timeDateToHms(d) {
+  const useUtc = isExcelPhantomDate(d);
+  const h = useUtc ? d.getUTCHours() : d.getHours();
+  const m = useUtc ? d.getUTCMinutes() : d.getMinutes();
+  const s = useUtc ? d.getUTCSeconds() : d.getSeconds();
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+}
+
+export function cellValueToImportString(cellValue, fieldKey) {
+  if (cellValue == null || cellValue === "") return "";
+  const isTimeField = IMPORT_TIME_FIELDS.includes(fieldKey);
+
+  if (typeof cellValue === "number" && Number.isFinite(cellValue)) {
+    if (fieldKey === "date" && cellValue > 59 && cellValue < 2000000) {
+      const ymd = parseImportDateToYmd(cellValue);
+      if (ymd) return ymd;
+    }
+    if (isTimeField && cellValue >= 0 && cellValue < 1) {
+      return excelDayFractionToHms(cellValue);
+    }
+    if (isTimeField && cellValue >= 1) {
+      const frac = cellValue % 1;
+      if (frac > 0) return excelDayFractionToHms(frac);
+    }
+  }
+
+  if (cellValue instanceof Date) {
+    if (fieldKey === "date") {
+      return dateCellToYmd(cellValue);
+    }
+    if (isTimeField) {
+      const h = cellValue.getHours();
+      const m = cellValue.getMinutes();
+      const looksLikeDateOnly =
+        h === 0 && m === 0 && cellValue.getSeconds() === 0;
+      if (looksLikeDateOnly && !isExcelPhantomDate(cellValue)) {
+        return dateCellToYmd(cellValue);
+      }
+      return timeDateToHms(cellValue);
+    }
+  }
+  if (typeof cellValue === "object" && cellValue.text != null) {
+    return String(cellValue.text).trim();
+  }
+  if (typeof cellValue === "object" && cellValue.result != null) {
+    return cellValueToImportString(cellValue.result, fieldKey);
+  }
+  return String(cellValue).trim();
+}
+
+export async function parseAttendanceImportFile(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".csv")) {
+    let text = await file.text();
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "");
+    if (lines.length < 2) {
+      throw new Error("CSV needs a header row and at least one data row.");
+    }
+    const headers = disambiguatePairHeaders(
+      lines[0].split(",").map((h) => normalizeImportHeaderCell(h.trim()))
+    );
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith("#")) continue;
+      const parts = line.split(",");
+      if (parts.every((p) => !String(p).trim())) continue;
+      const obj = {};
+      headers.forEach((h, idx) => {
+        if (!h) return;
+        obj[h] = String(parts[idx] ?? "").trim();
+      });
+      rows.push(obj);
+    }
+    return rows;
+  }
+
+  const buf = await file.arrayBuffer();
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf);
+  const sheet = wb.worksheets[0];
+  if (!sheet) throw new Error("No sheet found in workbook.");
+
+  const hRow = sheet.getRow(1);
+  const maxCol = hRow.cellCount;
+  const headers = [];
+  for (let c = 1; c <= maxCol; c++) {
+    const raw = hRow.getCell(c).value;
+    const text =
+      raw == null
+        ? ""
+        : typeof raw === "object" && raw.text != null
+          ? String(raw.text).trim()
+          : String(raw).trim();
+    headers.push(normalizeImportHeaderCell(text));
+  }
+
+  const headerKeys = disambiguatePairHeaders(headers);
+  const rows = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const col1 = cellValueToImportString(row.getCell(1).value, "username");
+    if (col1.trim().startsWith("#")) return;
+    const obj = {};
+    let hasAny = false;
+    for (let c = 1; c <= maxCol; c++) {
+      const key = headerKeys[c - 1];
+      if (!key) continue;
+      const v = cellValueToImportString(row.getCell(c).value, key);
+      if (v) hasAny = true;
+      obj[key] = v;
+    }
+    if (hasAny) rows.push(obj);
+  });
+  return rows;
+}
+
+/** When date column is empty but check-in holds a date (Excel column shift). */
+function healMisalignedImportRow(obj) {
+  const out = { ...obj };
+  let dateYmd = parseImportDateToYmd(out.date ?? "");
+  if (dateYmd) return out;
+
+  const checkinCell = out.checkin_time != null ? String(out.checkin_time).trim() : "";
+  const dateFromCheckin = parseImportDateToYmd(checkinCell);
+  if (!dateFromCheckin) return out;
+
+  dateYmd = dateFromCheckin;
+  const shifted = {
+    ...out,
+    date: dateYmd,
+    checkin_time: out.checkout_time ?? "",
+    checkout_time: out.break_morning_start ?? "",
+    break_morning_start: out.break_morning_end ?? "",
+    break_morning_end: out.break_lunch_start ?? "",
+    break_lunch_start: out.break_lunch_end ?? "",
+    break_lunch_end: out.break_evening_start ?? "",
+    break_evening_start: out.break_evening_end ?? "",
+    break_evening_end: "",
+  };
+  if (!shifted.checkin_address && out.checkout_address) {
+    shifted.checkin_address = out.checkout_address;
+  }
+  return shifted;
+}
+
+export function buildImportPayloadRows(parsed) {
+  return parsed.map((obj) => {
+    const healed = healMisalignedImportRow(obj);
+    const row = {
+      username: String(healed.username ?? "").trim(),
+      date: parseImportDateToYmd(healed.date ?? ""),
+    };
+    for (const key of IMPORT_TIME_FIELDS) {
+      const v = healed[key];
+      if (v != null && String(v).trim() !== "") {
+        row[key] = String(v).trim();
+      }
+    }
+    if (healed.checkin_address != null && String(healed.checkin_address).trim() !== "") {
+      row.checkin_address = String(healed.checkin_address).trim();
+    }
+    if (healed.checkout_address != null && String(healed.checkout_address).trim() !== "") {
+      row.checkout_address = String(healed.checkout_address).trim();
+    }
+    return row;
+  });
+}

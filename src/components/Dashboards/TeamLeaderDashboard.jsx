@@ -1,0 +1,80 @@
+// components/Dashboards/TeamLeaderDashboard.jsx
+import ProfilePicUploader from "@/app/user-dashboard/ProfilePicUploader";
+import AttendanceTracker from "@/components/AttendanceTracker";
+import UpcomingTasks from "@/components/task/UpcomingTasks";
+import UpcomingLeads from "@/components/Leads/UpcommingLeads";
+import UpcomingTeamLeaderFollowups from "@/components/Leads/UpcomingTeamLeaderFollowups";
+import FastCardsWidget from "@/components/FastCardsWidget";
+import TodayReportButton from "@/components/TodayReportButton";
+import LeaveApprovalButton from "@/components/LeaveApprovalButton";
+import ExpenseApprovalButton from "@/components/ExpenseApprovalButton";
+import ScheduleVisitCard from "@/components/scheduleVisit/ScheduleVisitCard";
+
+export default function TeamLeaderDashboard({ user, reportingManager }) {
+  return (
+    <div className="space-y-4 md:space-y-6">
+
+      {/* Welcome + Attendance */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+
+        <div className="lg:col-span-2 bg-white rounded-xl shadow-md p-4 md:p-6">
+          <div className="flex flex-col gap-4">
+            {/* Profile pic + name */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <ProfilePicUploader user={user} />
+              <div className="flex-1">
+                <h1 className="text-3xl font-semibold">
+                  Welcome, <span className="text-green-700">{user.username}</span>
+                </h1>
+                <p className="text-sm text-gray-500">Role: {user.userRole}</p>
+                {reportingManager && (
+                  <p className="text-sm text-gray-500">
+                    Reporting Manager: {reportingManager}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Buttons row - separate on mobile */}
+            <div className="flex flex-row gap-2 justify-start sm:justify-end flex-wrap">
+              <TodayReportButton />
+              <LeaveApprovalButton />
+              <ExpenseApprovalButton />
+              <ScheduleVisitCard variant="sales" href="/user-dashboard/schedule-visits" />
+            </div>
+
+            {/* Fast Cards */}
+            <div className="mt-4">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Fast Cards</p>
+              <FastCardsWidget />
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl shadow-md p-4 md:p-6">
+          <AttendanceTracker username={user.username} role={user.userRole} />
+        </div>
+
+      </div>
+
+      {/* Team Leader Followups */}
+      <div className="bg-white rounded-xl shadow-md">
+        <UpcomingTeamLeaderFollowups teamLeader={user.username} />
+      </div>
+
+      {/* Tasks + Leads */}
+      <div className="grid grid-cols-1 gap-4 md:gap-6">
+
+        <div className="bg-white rounded-xl shadow-md">
+          <UpcomingTasks leadSource={user.username} />
+        </div>
+
+        <div className="bg-white rounded-xl shadow-md">
+          <UpcomingLeads leadSource={user.username} userRole={user.userRole} />
+        </div>
+
+      </div>
+
+    </div>
+  );
+}

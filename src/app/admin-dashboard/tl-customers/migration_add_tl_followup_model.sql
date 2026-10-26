@@ -1,0 +1,3 @@
+
+
+ALTER TABLE TL_followups ADD COLUMN model VARCHAR(255) NULL AFTER multi_tag;

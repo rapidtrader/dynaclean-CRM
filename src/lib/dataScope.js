@@ -1,0 +1,99 @@
+import { normalizeRoleKey } from "@/lib/roleKeyUtils";
+
+export function isSuperAdminRole(role) {
+  const k = normalizeRoleKey(role);
+  return k === "SUPERADMIN" || k === "DIRECTOR";
+}
+
+/** Roles that may view all orders in Order Process (not scoped to created_by). */
+export function canViewAllOrders(role) {
+  const k = normalizeRoleKey(role || "");
+  return (
+    isSuperAdminRole(role) ||
+    k === "SALES CUM BACKOFFICE" ||
+    k === "ADMIN" ||
+    k === "ACCOUNTANT" ||
+    k === "WAREHOUSE INCHARGE" ||
+    k === "TEAM LEADER"
+  );
+}
+
+/** Roles that may search/view all customers (header search, reports, etc.) */
+export function canViewAllCustomers(role) {
+  const k = normalizeRoleKey(role || "");
+  return (
+    isSuperAdminRole(role) ||
+    k === "ADMIN" ||
+    k === "SERVICE HEAD" ||
+    k === "SALES CUM BACKOFFICE" ||
+    k === "HR" ||
+    k === "HR HEAD" ||
+    k === "HR EXECUTIVE" ||
+    k === "TEAM LEADER" ||
+    k === "EA"
+  );
+}
+
+/** SUPERADMIN, ADMIN, and DIRECTOR may view any employee on the daily dashboard; all other roles are self-only. */
+export function canViewAllEmployeeDailyReports(role) {
+  const k = normalizeRoleKey(role);
+  return k === "SUPERADMIN" || k === "ADMIN" || k === "DIRECTOR";
+}
+
+/** Service Support Report: admins/managers see all; SERVICE SUPPORT sees full team pool. */
+export function canViewAllServiceSupportReport(role) {
+  const k = normalizeRoleKey(role || "");
+  return (
+    k === "SUPERADMIN" ||
+    k === "ADMIN" ||
+    k === "DIRECTOR" ||
+    k === "SERVICE HEAD" ||
+    k === "EA"
+  );
+}
+
+export function getScopedUsername(payload) {
+  const u = String(payload?.username ?? "").trim();
+  return u || null;
+}
+
+/**
+ * Build an ownership WHERE fragment like:
+ *   (col1 = ? OR col2 = ?)
+ * returning { sql, params }.
+ *
+ * If role is SUPERADMIN → { sql: "", params: [] }.
+ * If username missing  → { sql: "1=0", params: [] } (deny-by-default).
+ *
+ * @param {{ role: string, username: string|null, columns: string[] }} args
+ */
+export function buildOwnershipWhere({ role, username, columns }) {
+  if (isSuperAdminRole(role)) return { sql: "", params: [] };
+  const u = String(username ?? "").trim();
+  if (!u) return { sql: "1=0", params: [] };
+  const cols = (columns || []).map(String).map((c) => c.trim()).filter(Boolean);
+  if (cols.length === 0) return { sql: "1=0", params: [] };
+  const sql = `(${cols.map((c) => `${c} = ?`).join(" OR ")})`;
+  return { sql, params: cols.map(() => u) };
+}
+
+/** GEM users: own customers via gem_lead_source, lead_source, assignment, or follow-up. */
+export function buildGemCustomerScopeWhere({ username, tableAlias = "" }) {
+  const prefix = tableAlias ? `${tableAlias}.` : "";
+  const u = String(username ?? "").trim();
+  if (!u) return { sql: "1=0", params: [] };
+
+  return {
+    sql: `(
+      ${prefix}gem_lead_source = ?
+      OR ${prefix}lead_source = ?
+      OR ${prefix}sales_representative = ?
+      OR ${prefix}assigned_to = ?
+      OR ${prefix}customer_id IN (
+        SELECT DISTINCT cf.customer_id FROM customers_followup cf WHERE cf.followed_by = ?
+      )
+    )`,
+    params: [u, u, u, u, u],
+  };
+}
+

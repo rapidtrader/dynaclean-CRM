@@ -1,0 +1,2034 @@
+"use client";
+
+import { formatCrmDateOnly } from "@/lib/crmDateFormat";
+
+import TypeableDateFilterInput from "@/components/ui/TypeableDateFilterInput";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import Link from "next/link";
+import { Search, Download, Eye, Plus, Edit2 } from "lucide-react";
+import MultiPurchaseLinkModal from "./MultiPurchaseLinkModal";
+import { toast } from "react-hot-toast";
+import ExcelJS from "exceljs";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { useUser } from "@/context/UserContext";
+import { parseLinkedStatementIds } from "@/lib/statementLinkedPurchases";
+
+const formatDisplayDate = (value) => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleDateString("en-IN");
+};
+
+const resolvePurchaseCategory = (purchase) => {
+  const category =
+    purchase?.category === "Product" || purchase?.category === "Spare"
+      ? purchase.category
+      : null;
+  return {
+    category,
+    sub_category: purchase?.sub_category || null,
+  };
+};
+
+const FILE_SERVE_PREFIX = "/api/serve/";
+
+const isExternalUrl = (url) => /^https?:\/\//i.test(url);
+
+function resolvePurchaseFileUrl(raw) {
+  if (!raw) return "";
+  const value = String(raw).trim();
+  if (!value) return "";
+  if (isExternalUrl(value) || value.startsWith(FILE_SERVE_PREFIX)) {
+    return value;
+  }
+
+  let pathPart = value;
+  let hash = "";
+  let query = "";
+
+  const hashIndex = pathPart.indexOf("#");
+  if (hashIndex !== -1) {
+    hash = pathPart.slice(hashIndex);
+    pathPart = pathPart.slice(0, hashIndex);
+  }
+
+  const queryIndex = pathPart.indexOf("?");
+  if (queryIndex !== -1) {
+    query = pathPart.slice(queryIndex + 1);
+    pathPart = pathPart.slice(0, queryIndex);
+  }
+
+  const normalized = pathPart.replace(/^\/+/, "");
+  if (!normalized) return value;
+
+  const lastSegment = normalized.split("/").pop();
+  if (!lastSegment || !lastSegment.includes(".")) {
+    return value;
+  }
+
+  const encodedPath = normalized
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+
+  const querySuffix = query ? `?${query}` : "";
+
+  return `${FILE_SERVE_PREFIX}${encodedPath}${querySuffix}${hash}`;
+}
+
+function EditTransportModal({ open, onClose, record, onSaved }) {
+  const [mode, setMode] = useState(record?.mode_of_transport || "");
+  const formatDateTimeForInput = (dateStr) => {
+    if (!dateStr) return "";
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return "";
+    // Use UTC methods to avoid timezone shifts
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const [form, setForm] = useState({
+    self_name: record?.self_name || "",
+    courier_tracking_id: record?.courier_tracking_id || "",
+    courier_company: record?.courier_company || "",
+    porter_tracking_id: record?.porter_tracking_id || "",
+    porter_contact: record?.porter_contact || "",
+    truck_number: record?.truck_number || "",
+    driver_name: record?.driver_name || "",
+    driver_number: record?.driver_number || "",
+    net_amount: record?.net_amount || "",
+    price_per_unit: record?.price_per_unit || "",
+    created_at: formatDateTimeForInput(record?.created_at) || "",
+    invoice_number: record?.invoice_number || "",
+    invoice_date: formatDateTimeForInput(record?.invoice_date) || "",
+  });
+  useEffect(() => {
+    setMode(record?.mode_of_transport || "");
+    setForm({
+      self_name: record?.self_name || "",
+      courier_tracking_id: record?.courier_tracking_id || "",
+      courier_company: record?.courier_company || "",
+      porter_tracking_id: record?.porter_tracking_id || "",
+      porter_contact: record?.porter_contact || "",
+      truck_number: record?.truck_number || "",
+      driver_name: record?.driver_name || "",
+      driver_number: record?.driver_number || "",
+      net_amount: record?.net_amount || "",
+      price_per_unit: record?.price_per_unit || "",
+      created_at: formatDateTimeForInput(record?.created_at) || "",
+      invoice_number: record?.invoice_number || "",
+      invoice_date: formatDateTimeForInput(record?.invoice_date) || "",
+    });
+  }, [record]);
+  const [files, setFiles] = useState({ quotation_upload: null, payment_proof_upload: null, invoice_upload: null, eway_bill: null });
+  function onFileChange(e, key) { setFiles((f) => ({ ...f, [key]: e.target.files?.[0] || null })); }
+  if (!open) return null;
+  const disabled = false;
+  const existingFileLinks = {
+    quotation: resolvePurchaseFileUrl(record?.quotation_upload),
+    paymentProof: resolvePurchaseFileUrl(record?.payment_proof_upload),
+    invoice: resolvePurchaseFileUrl(record?.invoice_upload),
+    ewayBill: resolvePurchaseFileUrl(record?.eway_bill),
+  };
+  async function save() {
+    try {
+      const fd = new FormData();
+      fd.append('id', String(record.id));
+      fd.append('mode_of_transport', mode);
+      fd.append('net_amount', form.net_amount);
+      fd.append('price_per_unit', form.price_per_unit);
+      // Send date as YYYY-MM-DD format, API will convert to MySQL datetime
+      fd.append('created_at', form.created_at || '');
+      fd.append('invoice_number', form.invoice_number || '');
+      fd.append('invoice_date', form.invoice_date || '');
+      if (mode === 'Self') fd.append('self_name', form.self_name);
+      if (mode === 'Courier') { fd.append('courier_tracking_id', form.courier_tracking_id); fd.append('courier_company', form.courier_company); }
+      if (mode === 'Porter') { fd.append('porter_tracking_id', form.porter_tracking_id); fd.append('porter_contact', form.porter_contact); }
+      if (mode === 'Truck') { fd.append('truck_number', form.truck_number); fd.append('driver_name', form.driver_name); fd.append('driver_number', form.driver_number); }
+      if (files.quotation_upload) fd.append('quotation_upload', files.quotation_upload);
+      if (files.payment_proof_upload) fd.append('payment_proof_upload', files.payment_proof_upload);
+      if (files.invoice_upload) fd.append('invoice_upload', files.invoice_upload);
+      if (files.eway_bill) fd.append('eway_bill', files.eway_bill);
+      const res = await fetch('/api/stock-request', { method: 'PATCH', body: fd });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || 'Failed');
+      }
+      onSaved?.();
+      onClose();
+      toast.success('Transport updated');
+    } catch (e) {
+      toast.error(e.message || 'Update failed');
+    }
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-xl p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Edit Transport (Req #{record?.id})</h3>
+          <button onClick={onClose} className="text-gray-500">✕</button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="block mb-1">Price Per Unit</label>
+            <input
+              type="number"
+              className="w-full border p-2 rounded"
+              value={form.price_per_unit}
+              onChange={(e) => setForm({ ...form, price_per_unit: e.target.value })}
+              disabled={disabled}
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Net Amount</label>
+            <input
+              type="number"
+              className="w-full border p-2 rounded"
+              value={form.net_amount}
+              onChange={(e) => setForm({ ...form, net_amount: e.target.value })}
+              disabled={disabled}
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Created Date</label>
+            <input
+              type="date"
+              className="w-full border p-2 rounded"
+              value={form.created_at ? form.created_at.split('T')[0] : ''}
+              onChange={(e) => setForm({ ...form, created_at: e.target.value })}
+              disabled={disabled}
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Invoice Number</label>
+            <input
+              type="text"
+              className="w-full border p-2 rounded"
+              value={form.invoice_number}
+              onChange={(e) => setForm({ ...form, invoice_number: e.target.value })}
+              disabled={disabled}
+              placeholder="Enter invoice number"
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Invoice Date</label>
+            <input
+              type="date"
+              className="w-full border p-2 rounded"
+              value={form.invoice_date ? form.invoice_date.split('T')[0] : ''}
+              onChange={(e) => setForm({ ...form, invoice_date: e.target.value })}
+              disabled={disabled}
+            />
+          </div>
+          <div>
+            <label className="block mb-1">Mode of Transport</label>
+            <select value={mode} onChange={(e) => setMode(e.target.value)} className="w-full border p-2 rounded" disabled={disabled}>
+              <option value="">Select Mode</option>
+              <option value="Self">Self</option>
+              <option value="Courier">Courier</option>
+              <option value="Porter">Porter</option>
+              <option value="Truck">Truck</option>
+            </select>
+          </div>
+          {mode === 'Self' && (
+            <div>
+              <label className="block mb-1">Self Name</label>
+              <input className="w-full border p-2 rounded" value={form.self_name} onChange={(e) => setForm({ ...form, self_name: e.target.value })} disabled={disabled} />
+            </div>
+          )}
+          {mode === 'Courier' && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block mb-1">Tracking ID</label>
+                <input className="w-full border p-2 rounded" value={form.courier_tracking_id} onChange={(e) => setForm({ ...form, courier_tracking_id: e.target.value })} disabled={disabled} />
+              </div>
+              <div>
+                <label className="block mb-1">Courier Company</label>
+                <input className="w-full border p-2 rounded" value={form.courier_company} onChange={(e) => setForm({ ...form, courier_company: e.target.value })} disabled={disabled} />
+              </div>
+            </div>
+          )}
+          {mode === 'Porter' && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block mb-1">Porter Tracking ID</label>
+                <input className="w-full border p-2 rounded" value={form.porter_tracking_id} onChange={(e) => setForm({ ...form, porter_tracking_id: e.target.value })} disabled={disabled} />
+              </div>
+              <div>
+                <label className="block mb-1">Porter Contact</label>
+                <input className="w-full border p-2 rounded" value={form.porter_contact} onChange={(e) => setForm({ ...form, porter_contact: e.target.value })} disabled={disabled} />
+              </div>
+            </div>
+          )}
+          {mode === 'Truck' && (
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block mb-1">Truck Number</label>
+                <input className="w-full border p-2 rounded" value={form.truck_number} onChange={(e) => setForm({ ...form, truck_number: e.target.value })} disabled={disabled} />
+              </div>
+              <div>
+                <label className="block mb-1">Driver Name</label>
+                <input className="w-full border p-2 rounded" value={form.driver_name} onChange={(e) => setForm({ ...form, driver_name: e.target.value })} disabled={disabled} />
+              </div>
+              <div>
+                <label className="block mb-1">Driver Number</label>
+                <input className="w-full border p-2 rounded" value={form.driver_number} onChange={(e) => setForm({ ...form, driver_number: e.target.value })} disabled={disabled} />
+              </div>
+            </div>
+          )}
+          <div className="pt-2 border-t mt-2">
+            <h4 className="font-medium mb-2">Files (re-upload to replace)</h4>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block mb-1 text-sm">Quotation Upload</label>
+                {existingFileLinks.quotation && (
+                  <div className="text-xs text-gray-600 mb-1 flex items-center gap-1">
+                    Current: <a href={existingFileLinks.quotation} target="_blank" rel="noreferrer" className="text-blue-600 underline flex items-center gap-1"><Eye size={12} /> View</a>
+                  </div>
+                )}
+                <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => onFileChange(e, 'quotation_upload')} className="w-full border p-2 rounded" />
+              </div>
+              <div>
+                <label className="block mb-1 text-sm">Payment Proof Upload</label>
+                {existingFileLinks.paymentProof && (
+                  <div className="text-xs text-gray-600 mb-1 flex items-center gap-1">
+                    Current: <a href={existingFileLinks.paymentProof} target="_blank" rel="noreferrer" className="text-blue-600 underline flex items-center gap-1"><Eye size={12} /> View</a>
+                  </div>
+                )}
+                <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => onFileChange(e, 'payment_proof_upload')} className="w-full border p-2 rounded" />
+              </div>
+              <div>
+                <label className="block mb-1 text-sm">Invoice Upload</label>
+                {existingFileLinks.invoice && (
+                  <div className="text-xs text-gray-600 mb-1 flex items-center gap-1">
+                    Current: <a href={existingFileLinks.invoice} target="_blank" rel="noreferrer" className="text-blue-600 underline flex items-center gap-1"><Eye size={12} /> View</a>
+                  </div>
+                )}
+                <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => onFileChange(e, 'invoice_upload')} className="w-full border p-2 rounded" />
+              </div>
+              <div>
+                <label className="block mb-1 text-sm">E-Way Bill</label>
+                {existingFileLinks.ewayBill && (
+                  <div className="text-xs text-gray-600 mb-1 flex items-center gap-1">
+                    Current: <a href={existingFileLinks.ewayBill} target="_blank" rel="noreferrer" className="text-blue-600 underline flex items-center gap-1"><Eye size={12} /> View</a>
+                  </div>
+                )}
+                <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => onFileChange(e, 'eway_bill')} className="w-full border p-2 rounded" />
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 rounded border">Cancel</button>
+          <button onClick={save} disabled={disabled || !mode} className="px-3 py-1.5 rounded bg-green-600 text-white disabled:opacity-50">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditCustomerModal({ open, onClose, record, onSaved }) {
+  const [customerIdSearch, setCustomerIdSearch] = useState("");
+  const [customerSuggestions, setCustomerSuggestions] = useState([]);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+
+  useEffect(() => {
+    if (open) {
+      setCustomerIdSearch("");
+      setCustomerSuggestions([]);
+      if (record) {
+        setSelectedCustomer({
+          customer_id: record.customer_id,
+          first_name: record.client_name?.split(' ')[0] || '',
+          last_name: record.client_name?.split(' ').slice(1).join(' ') || '',
+          company: record.client_company_name,
+          phone: record.client_number,
+          email: record.client_email,
+          gstin: record.client_gstin,
+          address: record.customer_address
+        });
+      } else {
+        setSelectedCustomer(null);
+      }
+    }
+  }, [open, record]);
+
+  // Search customers by customer_id or name
+  useEffect(() => {
+    if (!customerIdSearch.trim()) {
+      setCustomerSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingCustomers(true);
+    fetch(`/api/customers/list?search=${encodeURIComponent(customerIdSearch)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        setCustomerSuggestions(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        if (!cancelled) toast.error("Failed to search customers");
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingCustomers(false);
+      });
+    return () => { cancelled = true; };
+  }, [customerIdSearch]);
+
+  const handleCustomerSelect = (customer) => {
+    setSelectedCustomer(customer);
+    setCustomerIdSearch(`${customer.first_name} ${customer.last_name || ''} (ID: ${customer.customer_id})`);
+    setCustomerSuggestions([]);
+  };
+
+  async function save() {
+    if (!selectedCustomer) {
+      toast.error("Please select a customer first");
+      return;
+    }
+    try {
+      const fd = new FormData();
+      fd.append('id', String(record.id));
+      fd.append('customer_id', selectedCustomer.customer_id);
+      fd.append('client_name', `${selectedCustomer.first_name} ${selectedCustomer.last_name || ''}`.trim());
+      fd.append('client_company_name', selectedCustomer.company || '');
+      fd.append('client_number', selectedCustomer.phone || '');
+      fd.append('client_email', selectedCustomer.email || '');
+      fd.append('client_gstin', selectedCustomer.gstin || '');
+      fd.append('customer_address', selectedCustomer.address || '');
+      
+      const res = await fetch('/api/stock-request', { method: 'PATCH', body: fd });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || 'Failed');
+      }
+      onSaved?.();
+      onClose();
+      toast.success('Customer details updated');
+    } catch (e) {
+      toast.error(e.message || 'Update failed');
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Edit Customer (Req #{record?.id})</h3>
+          <button onClick={onClose} className="text-gray-500">✕</button>
+        </div>
+        <div className="space-y-3">
+          <div className="relative">
+            <label className="block mb-1">Search Customer</label>
+            <input
+              type="text"
+              placeholder="Search by Customer ID, Name, Phone, Email, GSTIN..."
+              className="w-full border p-2 rounded pr-10"
+              value={customerIdSearch}
+              onChange={(e) => setCustomerIdSearch(e.target.value)}
+            />
+            {loadingCustomers && (
+              <div className="absolute right-3 top-9">Loading...</div>
+            )}
+            {customerSuggestions.length > 0 && (
+              <div className="absolute z-10 w-full mt-1 bg-white border rounded shadow-lg max-h-60 overflow-y-auto">
+                {customerSuggestions.map((customer) => (
+                  <div
+                    key={customer.customer_id}
+                    className="p-2 hover:bg-gray-100 cursor-pointer"
+                    onClick={() => handleCustomerSelect(customer)}
+                  >
+                    <div className="font-medium">
+                      {customer.first_name} {customer.last_name || ''}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      ID: {customer.customer_id} | {customer.phone || 'No Phone'} | {customer.company || 'No Company'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {selectedCustomer && (
+            <div className="border rounded p-3 bg-gray-50">
+              <h4 className="font-medium mb-2">Selected Customer</h4>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div><span className="font-semibold">ID:</span> {selectedCustomer.customer_id}</div>
+                <div><span className="font-semibold">Name:</span> {selectedCustomer.first_name} {selectedCustomer.last_name || ''}</div>
+                <div><span className="font-semibold">Company:</span> {selectedCustomer.company || '—'}</div>
+                <div><span className="font-semibold">Phone:</span> {selectedCustomer.phone || '—'}</div>
+                <div><span className="font-semibold">Email:</span> {selectedCustomer.email || '—'}</div>
+                <div><span className="font-semibold">GSTIN:</span> {selectedCustomer.gstin || '—'}</div>
+                <div className="col-span-2"><span className="font-semibold">Address:</span> {selectedCustomer.address || '—'}</div>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 rounded border">Cancel</button>
+          <button onClick={save} disabled={!selectedCustomer} className="px-3 py-1.5 rounded bg-green-600 text-white disabled:opacity-50">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const parseLinkedPurchaseIds = (raw) => {
+  if (raw == null || String(raw).trim() === "") return [];
+  let arr = null;
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (Array.isArray(parsed)) arr = parsed;
+  } catch {
+    arr = String(raw).split(",");
+  }
+  const ids = [];
+  for (const v of arr) {
+    if (v == null) continue;
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+      ids.push(Math.trunc(v));
+      continue;
+    }
+    const s = String(v).trim().toUpperCase();
+    if (!s) continue;
+    if (/^PP\d+$/.test(s)) {
+      const n = Number(s.slice(2));
+      if (Number.isFinite(n) && n > 0) ids.push(n);
+      continue;
+    }
+    if (/^\d+$/.test(s)) {
+      const n = Number(s);
+      if (Number.isFinite(n) && n > 0) ids.push(n);
+      continue;
+    }
+  }
+  return ids;
+};
+
+function buildPaymentLinkMaps(statements, purchases) {
+  const next = new Set();
+  const transMap = {};
+  const stmtMap = {};
+
+  const addLink = (pid, stmt) => {
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    next.add(pid);
+    if (!transMap[pid]) transMap[pid] = [];
+    if (stmt?.trans_id && !transMap[pid].includes(stmt.trans_id)) {
+      transMap[pid].push(stmt.trans_id);
+    }
+    if (!stmtMap[pid]) stmtMap[pid] = [];
+    if (stmt?.id != null && !stmtMap[pid].includes(Number(stmt.id))) {
+      stmtMap[pid].push(Number(stmt.id));
+    }
+  };
+
+  const addTransToken = (pid, token) => {
+    if (!Number.isFinite(pid) || pid <= 0 || token == null) return;
+    const value = String(token).trim();
+    if (!value) return;
+    next.add(pid);
+    if (!transMap[pid]) transMap[pid] = [];
+    if (!transMap[pid].includes(value)) {
+      transMap[pid].push(value);
+    }
+  };
+
+  for (const s of statements) {
+    const ids = parseLinkedPurchaseIds(s?.linked_purchase_ids);
+    for (const id of ids) {
+      addLink(id, s);
+    }
+  }
+
+  const byTransId = new Map();
+  const byId = new Map();
+  for (const s of statements) {
+    if (s?.trans_id != null) byTransId.set(String(s.trans_id), s);
+    if (s?.id != null) byId.set(Number(s.id), s);
+  }
+
+  for (const p of purchases) {
+    const pid = Number(p?.id);
+    const tokens = parseLinkedStatementIds(p?.linked_statement_ids);
+    for (const token of tokens) {
+      const value = String(token).trim();
+      if (!value) continue;
+
+      const matchedByTransId = byTransId.get(value);
+      if (matchedByTransId) {
+        addLink(pid, matchedByTransId);
+        continue;
+      }
+
+      if (/^\d+$/.test(value)) {
+        const matchedById = byId.get(Number(value));
+        if (matchedById) {
+          addLink(pid, matchedById);
+          continue;
+        }
+      }
+
+      addTransToken(pid, value);
+    }
+  }
+
+  const transDisplayMap = {};
+  for (const pid in transMap) {
+    transDisplayMap[pid] = transMap[pid].join(", ");
+  }
+
+  return {
+    linkedPurchaseIds: next,
+    transDisplayMap,
+    stmtMap,
+  };
+}
+
+function LinkPaymentModal({ open, onClose, purchase, onLinked, currentStatementIds, userRole }) {
+  const [loading, setLoading] = useState(false);
+  const [statements, setStatements] = useState([]);
+  const [search, setSearch] = useState("");
+  const [linkingId, setLinkingId] = useState(null);
+  const [showOnlySelected, setShowOnlySelected] = useState(userRole === "SUPERADMIN");
+
+  useEffect(() => {
+    if (!open) return;
+    setStatements([]);
+    setSearch("");
+    let cancelled = false;
+    setLoading(true);
+    fetch("/api/statements", { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const rows = Array.isArray(data?.statements) ? data.statements : [];
+        setStatements(rows);
+      })
+      .catch(() => {
+        if (!cancelled) toast.error("Failed to load statements");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const getLinkedKeys = (stmt) => {
+    const raw = stmt?.linked_purchase_ids;
+    if (raw == null || String(raw).trim() === "") return [];
+    let arr = null;
+    try {
+      const parsed = JSON.parse(String(raw));
+      if (Array.isArray(parsed)) arr = parsed;
+    } catch {
+      arr = String(raw).split(",").map(s => s.trim()).filter(Boolean);
+    }
+    const keys = [];
+    for (const v of arr) {
+      if (v == null) continue;
+      const s = String(v).trim().toUpperCase();
+      if (!s) continue;
+      if (/^(PP|PS|SP)\d+$/.test(s)) {
+        keys.push(s.startsWith("SP") ? `PS${s.slice(2)}` : s);
+      } else if (/^\d+$/.test(s)) {
+        keys.push(`PP${s}`);
+      }
+    }
+    return keys;
+  };
+
+  const hasPurchaseId = (stmt) => {
+    const pid = Number(purchase?.id);
+    if (!Number.isFinite(pid) || pid <= 0) return false;
+    return getLinkedKeys(stmt).includes(`PP${pid}`);
+  };
+
+  const isStatementLinkedToPurchase = (stmt) => {
+    if (hasPurchaseId(stmt)) return true;
+    return Array.isArray(currentStatementIds) && currentStatementIds.includes(Number(stmt?.id));
+  };
+
+  const { currentTotal, myKey } = useMemo(() => {
+    const pid = Number(purchase?.id);
+    const key = Number.isFinite(pid) && pid > 0 ? `PP${pid}` : "";
+    const total = statements.reduce((acc, s) => {
+      if (getLinkedKeys(s).includes(key)) {
+        return acc + Number(s.amount || 0);
+      }
+      if (Array.isArray(currentStatementIds) && currentStatementIds.includes(Number(s?.id))) {
+        return acc + Number(s.amount || 0);
+      }
+      return acc;
+    }, 0);
+    return { currentTotal: total, myKey: key };
+  }, [statements, purchase?.id, currentStatementIds]);
+
+  const eligibleStatements = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const isUnsettled = (s) =>
+      (String(s.invoice_status || "").trim() === "Unsettled") ||
+      (!s.invoice_status && !s.client_expense_id);
+    const isDebit = (s) => String(s.type || "").trim() === "Debit";
+
+    let rows = statements.filter((s) => {
+      if (!isDebit(s)) return false;
+      const linked = getLinkedKeys(s);
+      // Show if it's already linked to THIS purchase
+      if (linked.includes(myKey)) return true;
+      // Also show if it's unsettled (and not linked to anything else)
+      if (isUnsettled(s) && linked.length === 0) return true;
+      // Also show if it's explicitly passed in currentStatementIds
+      if (Array.isArray(currentStatementIds) && currentStatementIds.includes(Number(s?.id))) return true;
+
+      return false;
+    });
+
+    // Filter to show only selected (linked to current purchase) if checkbox is checked
+    if (showOnlySelected) {
+      rows = rows.filter((s) => isStatementLinkedToPurchase(s));
+    }
+
+    if (q) {
+      rows = rows.filter((s) => {
+        const id = String(s.id ?? "").toLowerCase();
+        const transId = String(s.trans_id ?? "").toLowerCase();
+        const desc = String(s.description ?? "").toLowerCase();
+        const amount = String(s.amount ?? "").toLowerCase();
+        const linked = String(s.linked_purchase_ids ?? "").toLowerCase();
+        
+        return id.includes(q) || transId.includes(q) || desc.includes(q) || amount.includes(q) || linked.includes(q);
+      });
+    }
+
+    return rows;
+  }, [statements, search, myKey, currentStatementIds, showOnlySelected]);
+
+  async function toggleLink(statementId, transId, currentlyLinked) {
+    try {
+      if (!purchase?.id) return;
+      
+      const action = currentlyLinked ? "unlink" : "link";
+      const stmt = statements.find(s => s.id === statementId);
+      const stmtAmount = Number(stmt?.amount || 0);
+
+      if (action === "link") {
+        if (currentTotal + stmtAmount > Number(purchase.net_amount || 0)) {
+          toast.error(`Cannot link: Total payment (₹${(currentTotal + stmtAmount).toLocaleString()}) would exceed Net Amount (₹${Number(purchase.net_amount || 0).toLocaleString()})`);
+          return;
+        }
+      }
+
+      setLinkingId(statementId);
+      const res = await fetch(`/api/statements/${statementId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          purchase_id: purchase.id,
+          purchase_type: "PP",
+          action: action
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Failed to ${action}`);
+
+      toast.success(action === "link" ? "Payment linked" : "Payment unlinked");
+
+      // Update local state of statements so the UI updates immediately
+      setStatements(prev => prev.map(s => {
+        if (s.id === statementId) {
+          const pid = Number(purchase.id);
+          const token = `PP${pid}`;
+          let linked = getLinkedKeys(s);
+          if (action === "link") {
+            if (!linked.includes(token)) linked.push(token);
+          } else {
+            linked = linked.filter(t => t !== token);
+          }
+          return {
+            ...s,
+            linked_purchase_ids: JSON.stringify(linked),
+            invoice_status: linked.length > 0 ? "Settled" : "Unsettled"
+          };
+        }
+        return s;
+      }));
+
+      onLinked?.(purchase.id, statementId, transId, action);
+    } catch (e) {
+      toast.error(e.message || "Operation failed");
+    } finally {
+      setLinkingId(null);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-5xl p-4 max-h-[85vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-lg font-semibold">Link Payment</h3>
+            <div className="flex flex-col gap-0.5 mt-0.5">
+              <p className="text-xs text-gray-500">
+                Purchase #{purchase?.id} • Multiple selection enabled
+              </p>
+              <p className="text-xs font-medium">
+                <span className="text-gray-600">Net Amount:</span> <span className="text-blue-700">₹{Number(purchase?.net_amount || 0).toLocaleString()}</span>
+                <span className="mx-2 text-gray-300">|</span>
+                <span className="text-gray-600">Total Linked:</span> <span className={`${currentTotal > Number(purchase?.net_amount || 0) ? 'text-red-600' : 'text-emerald-700'}`}>₹{currentTotal.toLocaleString()}</span>
+                <span className="mx-2 text-gray-300">|</span>
+                <span className="text-gray-600">Remaining:</span> <span className="text-gray-800">₹{Math.max(0, Number(purchase?.net_amount || 0) - currentTotal).toLocaleString()}</span>
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700 text-xl">✕</button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div className="relative">
+            <Search className="absolute left-2 top-2.5 h-4 w-4 text-gray-500" />
+            <input
+              type="text"
+              placeholder="Search statement..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-8 pr-3 py-1.5 border rounded-md text-sm w-72 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+          <div className="flex items-center gap-4">
+            {userRole === "SUPERADMIN" && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showOnlySelected}
+                  onChange={(e) => setShowOnlySelected(e.target.checked)}
+                  className="w-4 h-4 accent-blue-600"
+                />
+                <span className="text-sm font-medium text-gray-700">Show Selected Only</span>
+              </label>
+            )}
+            <div className="text-xs text-gray-600 font-medium">
+              {loading ? "Loading..." : `Showing ${eligibleStatements.length} statement(s)`}
+            </div>
+          </div>
+        </div>
+
+        <div className="border rounded-lg overflow-hidden shadow-sm">
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-100 text-left">
+              <tr>
+                <th className="p-3 border-b font-semibold text-gray-700">ID</th>
+                <th className="p-3 border-b font-semibold text-gray-700">Trans ID</th>
+                <th className="p-3 border-b font-semibold text-gray-700">Date</th>
+                <th className="p-3 border-b font-semibold text-gray-700">Description</th>
+                <th className="p-3 border-b font-semibold text-gray-700">Amount</th>
+                <th className="p-3 border-b font-semibold text-gray-700">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {loading ? (
+                <tr>
+                  <td colSpan={6} className="p-10 text-center text-gray-500">
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                      <span>Loading statements...</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : eligibleStatements.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-10 text-center text-gray-500">No matching unsettled statements found</td>
+                </tr>
+              ) : (
+                eligibleStatements.map((s) => {
+                  const alreadyLinkedToThis = isStatementLinkedToPurchase(s);
+                  const linkedKeys = getLinkedKeys(s);
+                  const myKey = purchase?.id != null ? `PP${Number(purchase.id)}` : "";
+                  const linkedToOther = linkedKeys.length > 0 && !linkedKeys.includes(myKey);
+                  const isLinking = linkingId === s.id;
+
+                  let btnClass = "px-4 py-1.5 rounded text-sm font-medium transition-colors ";
+                  if (isLinking) btnClass += "bg-gray-200 text-gray-500 cursor-wait";
+                  else if (alreadyLinkedToThis) btnClass += "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100";
+                  else btnClass += "bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm";
+
+                  return (
+                    <tr key={s.id} className={`hover:bg-gray-50 transition-colors ${alreadyLinkedToThis ? 'bg-emerald-50/30' : ''}`}>
+                      <td className="p-3 font-medium text-gray-600">#{s.id}</td>
+                      <td className="p-3 font-mono text-xs text-gray-500">{s.trans_id || "—"}</td>
+                      <td className="p-3 text-gray-600">{s.date ? formatCrmDateOnly(s.date) : "—"}</td>
+                      <td className="p-3 max-w-[400px] truncate text-gray-600" title={s.description || ""}>{s.description || "—"}</td>
+                      <td className="p-3 font-bold text-red-600">₹{Number(s.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                      <td className="p-3">
+                        <button
+                          type="button"
+                          onClick={() => toggleLink(s.id, s.trans_id || "", alreadyLinkedToThis)}
+                          disabled={isLinking}
+                          className={btnClass}
+                        >
+                          {isLinking ? "Processing..." : alreadyLinkedToThis ? "Deselect" : "Select"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="mt-4 flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-6 py-2 bg-gray-800 text-white rounded-md hover:bg-gray-900 transition-colors font-medium shadow-sm"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const PURCHASES_PAGE_SIZE = 40;
+
+function defaultPurchaseCreatedDateFrom() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function defaultPurchaseCreatedDateTo() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+export default function PurchasesPage({ infiniteScroll = false }) {
+  const { user } = useUser();
+  const userRole = user?.userRole;
+  
+  const [purchases, setPurchases] = useState([]);
+  const [totalCount, setTotalCount] = useState(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadMoreRef = useRef(null);
+  const [hoveredImg, setHoveredImg] = useState(null); // { src, x, y }
+  const hoverTimerRef = useRef(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [startDate, setStartDate] = useState(defaultPurchaseCreatedDateFrom);
+  const [endDate, setEndDate] = useState(defaultPurchaseCreatedDateTo);
+  const [invoiceNumberFilter, setInvoiceNumberFilter] = useState("");
+  const [invoiceDateStart, setInvoiceDateStart] = useState("");
+  const [invoiceDateEnd, setInvoiceDateEnd] = useState("");
+  const [sortColumn, setSortColumn] = useState("created_at");
+  const [sortDirection, setSortDirection] = useState("desc");
+  const [showExportOptions, setShowExportOptions] = useState(false);
+  const [previewImage, setPreviewImage] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [detailPurchase, setDetailPurchase] = useState(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editRecord, setEditRecord] = useState(null);
+  const [linkPaymentOpen, setLinkPaymentOpen] = useState(false);
+  const [linkPurchase, setLinkPurchase] = useState(null);
+  const [linkedPurchaseIds, setLinkedPurchaseIds] = useState(() => new Set());
+  const [paymentTransByPurchaseId, setPaymentTransByPurchaseId] = useState(() => ({}));
+  const [paymentStatementByPurchaseId, setPaymentStatementByPurchaseId] = useState(() => ({}));
+  const [selectedPurchaseIds, setSelectedPurchaseIds] = useState(() => new Set());
+  const [isMultiLinkModalOpen, setIsMultiLinkModalOpen] = useState(false);
+  const [editCustomerOpen, setEditCustomerOpen] = useState(false);
+  const [editCustomerRecord, setEditCustomerRecord] = useState(null);
+
+  useEffect(() => {
+    loadPurchaseData();
+  }, [infiniteScroll]);
+
+  const normalizePurchaseRows = (raw) =>
+    (Array.isArray(raw) ? raw : []).map((row) => {
+      const { category, sub_category } = resolvePurchaseCategory(row);
+      return { ...row, category, sub_category };
+    });
+
+  const loadPurchases = async ({ append = false, offset = 0 } = {}) => {
+    try {
+      if (append) setLoadingMore(true);
+      else setLoading(true);
+
+      const url = infiniteScroll
+        ? `/api/stock-request?limit=${PURCHASES_PAGE_SIZE}&offset=${offset}`
+        : "/api/stock-request";
+
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        let rows;
+        if (infiniteScroll && data && Array.isArray(data.items)) {
+          rows = normalizePurchaseRows(data.items);
+          setTotalCount(Number(data.total ?? 0));
+          setHasMore(Boolean(data.hasMore));
+        } else {
+          rows = normalizePurchaseRows(data);
+          setTotalCount(rows.length);
+          setHasMore(false);
+        }
+
+        if (append) {
+          setPurchases((prev) => {
+            const seen = new Set(prev.map((p) => p.id));
+            const merged = [...prev];
+            for (const row of rows) {
+              if (!seen.has(row.id)) {
+                seen.add(row.id);
+                merged.push(row);
+              }
+            }
+            return merged;
+          });
+        } else {
+          setPurchases(rows);
+        }
+        return rows;
+      }
+    } catch (error) {
+      console.error("Error loading purchases:", error);
+      toast.error("Failed to load purchases");
+    } finally {
+      if (append) setLoadingMore(false);
+      else setLoading(false);
+    }
+    return [];
+  };
+
+  const loadMorePurchases = useCallback(async () => {
+    if (!infiniteScroll || loading || loadingMore || !hasMore) return;
+    const offset = purchases.length;
+    const newRows = await loadPurchases({ append: true, offset });
+    if (!newRows?.length) return;
+    const seen = new Set(purchases.map((p) => p.id));
+    const merged = [...purchases];
+    for (const row of newRows) {
+      if (!seen.has(row.id)) merged.push(row);
+    }
+    await loadLinkedPurchaseIds(merged);
+  }, [infiniteScroll, loading, loadingMore, hasMore, purchases]);
+
+  useEffect(() => {
+    if (!infiniteScroll) return;
+    const el = loadMoreRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadMorePurchases();
+        }
+      },
+      { root: null, rootMargin: "200px", threshold: 0 },
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [infiniteScroll, loadMorePurchases, purchases.length, hasMore]);
+
+  const loadLinkedPurchaseIds = async (purchaseRows = purchases) => {
+    try {
+      const res = await fetch("/api/statements", { credentials: "include" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return;
+      const rows = Array.isArray(data?.statements) ? data.statements : [];
+      const maps = buildPaymentLinkMaps(rows, purchaseRows);
+      setLinkedPurchaseIds(maps.linkedPurchaseIds);
+      setPaymentTransByPurchaseId(maps.transDisplayMap);
+      setPaymentStatementByPurchaseId(maps.stmtMap);
+    } catch {}
+  };
+
+  const loadPurchaseData = async () => {
+    const rows = await loadPurchases();
+    await loadLinkedPurchaseIds(rows);
+  };
+
+  const markPurchaseLinked = (purchaseId, statementId, transId, action = "link") => {
+    const pid = Number(purchaseId);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+
+    if (action === "link") {
+      setLinkedPurchaseIds((prev) => {
+        const next = new Set(prev);
+        next.add(pid);
+        return next;
+      });
+      setPaymentTransByPurchaseId((prev) => {
+        const current = prev?.[pid] ? String(prev[pid]).split(", ").filter(Boolean) : [];
+        if (transId && !current.includes(transId)) {
+          current.push(transId);
+        }
+        return { ...prev, [pid]: current.join(", ") };
+      });
+      setPaymentStatementByPurchaseId((prev) => {
+        const current = Array.isArray(prev?.[pid]) ? [...prev[pid]] : [];
+        if (statementId != null && !current.includes(Number(statementId))) {
+          current.push(Number(statementId));
+        }
+        return { ...prev, [pid]: current };
+      });
+    } else {
+      // unlink
+      setPaymentStatementByPurchaseId((prev) => {
+        const current = Array.isArray(prev?.[pid]) ? prev[pid].filter(id => id !== Number(statementId)) : [];
+        if (current.length === 0) {
+          setLinkedPurchaseIds(p => {
+            const n = new Set(p);
+            n.delete(pid);
+            return n;
+          });
+        }
+        return { ...prev, [pid]: current };
+      });
+      setPaymentTransByPurchaseId((prev) => {
+        const current = prev?.[pid] ? String(prev[pid]).split(", ").filter(Boolean) : [];
+        const next = current.filter(t => t !== transId);
+        return { ...prev, [pid]: next.join(", ") };
+      });
+    }
+  };
+
+  const filteredPurchases = useMemo(() => {
+    let filtered = purchases;
+
+    // Status filter
+    if (statusFilter !== "all") {
+      filtered = filtered.filter((p) => p.status === statusFilter);
+    }
+
+    // Category filter (Product / Spare / Other)
+    if (categoryFilter !== "all") {
+      filtered = filtered.filter((p) => {
+        const { category } = resolvePurchaseCategory(p);
+        if (categoryFilter === "Other") return !category;
+        return category === categoryFilter;
+      });
+    }
+
+    // Search filter
+    if (search) {
+      const q = search.toLowerCase();
+      filtered = filtered.filter((p) => {
+        // Check basic purchase fields
+        const basicMatch = Object.values(p).some((val) =>
+          String(val).toLowerCase().includes(q)
+        );
+        if (basicMatch) return true;
+
+        // Check linked Transaction IDs
+        const transIds = String(paymentTransByPurchaseId?.[Number(p.id)] || "").toLowerCase();
+        return transIds.includes(q);
+      });
+    }
+
+    // Date filter
+    if (startDate) {
+      filtered = filtered.filter((p) => new Date(p.created_at) >= new Date(startDate));
+    }
+    if (endDate) {
+      filtered = filtered.filter((p) => new Date(p.created_at) <= new Date(endDate + 'T23:59:59'));
+    }
+
+    // Invoice number filter
+    if (invoiceNumberFilter.trim()) {
+      const q = invoiceNumberFilter.trim().toLowerCase();
+      filtered = filtered.filter((p) =>
+        String(p.invoice_number || "").toLowerCase().includes(q)
+      );
+    }
+
+    // Invoice date filter
+    if (invoiceDateStart) {
+      filtered = filtered.filter((p) =>
+        p.invoice_date && new Date(p.invoice_date) >= new Date(invoiceDateStart)
+      );
+    }
+    if (invoiceDateEnd) {
+      filtered = filtered.filter((p) =>
+        p.invoice_date && new Date(p.invoice_date) <= new Date(invoiceDateEnd + 'T23:59:59')
+      );
+    }
+
+    // Sorting
+    filtered = [...filtered].sort((a, b) => {
+      let aVal = a[sortColumn];
+      let bVal = b[sortColumn];
+      
+      // Handle numeric fields
+      if (['quantity', 'price_per_unit', 'net_amount', 'id'].includes(sortColumn)) {
+        aVal = Number(aVal) || 0;
+        bVal = Number(bVal) || 0;
+      }
+      
+      // Handle date fields
+      if (['created_at'].includes(sortColumn)) {
+        aVal = new Date(aVal).getTime();
+        bVal = new Date(bVal).getTime();
+      }
+      
+      if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    // Now group children under their parents
+    const parentMap = {};
+    const childMap = {};
+    filtered.forEach(p => {
+      if (p.parent_id) {
+        if (!childMap[p.parent_id]) childMap[p.parent_id] = [];
+        childMap[p.parent_id].push(p);
+      } else {
+        parentMap[p.id] = p;
+      }
+    });
+    const sortedFiltered = [];
+    // Add all parents first, sorted descending by id
+    Object.values(parentMap)
+      .sort((a, b) => b.id - a.id)
+      .forEach(parent => {
+        sortedFiltered.push(parent);
+        // Then add children of this parent
+        if (childMap[parent.id]) {
+          sortedFiltered.push(...childMap[parent.id].sort((a, b) => a.id - b.id));
+        }
+      });
+    // Then add any purchases without parent that weren't added yet, sorted descending
+    filtered
+      .filter(p => !sortedFiltered.find(sp => sp.id === p.id))
+      .sort((a, b) => b.id - a.id)
+      .forEach(p => sortedFiltered.push(p));
+    return sortedFiltered;
+  }, [purchases, search, statusFilter, categoryFilter, paymentTransByPurchaseId, startDate, endDate, invoiceNumberFilter, invoiceDateStart, invoiceDateEnd, sortColumn, sortDirection]);
+
+  const totals = useMemo(() => {
+    return filteredPurchases.reduce((acc, p) => {
+      acc.totalQty += Number(p.quantity) || 0;
+      acc.totalAmount += Number(p.net_amount) || 0;
+      acc.totalPricePerUnit += Number(p.price_per_unit) || 0;
+      return acc;
+    }, { totalQty: 0, totalAmount: 0, totalPricePerUnit: 0 });
+  }, [filteredPurchases]);
+
+  const selectedTotals = useMemo(() => {
+    return filteredPurchases.reduce((acc, p) => {
+      if (selectedPurchaseIds.has(Number(p.id))) {
+        acc.selectedNetAmount += Number(p.net_amount) || 0;
+      }
+      return acc;
+    }, { selectedNetAmount: 0 });
+  }, [filteredPurchases, selectedPurchaseIds]);
+
+  const togglePurchaseSelection = (id) => {
+    setSelectedPurchaseIds((prev) => {
+      const newSet = new Set(prev);
+      const purchase = purchases.find(p => p.id === id);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+        // If it's a parent, also deselect all its children
+        if (!purchase?.parent_id) {
+          purchases.filter(p => p.parent_id === id).forEach(child => newSet.delete(child.id));
+        }
+        // If it's a child, also deselect its parent and all siblings
+        if (purchase?.parent_id) {
+          newSet.delete(purchase.parent_id);
+          purchases.filter(p => p.parent_id === purchase.parent_id).forEach(child => newSet.delete(child.id));
+        }
+      } else {
+        newSet.add(id);
+        // If it's a parent, also select all its children
+        if (!purchase?.parent_id) {
+          purchases.filter(p => p.parent_id === id).forEach(child => newSet.add(child.id));
+        }
+        // If it's a child, also select its parent and all siblings
+        if (purchase?.parent_id) {
+          newSet.add(purchase.parent_id);
+          purchases.filter(p => p.parent_id === purchase.parent_id).forEach(child => newSet.add(child.id));
+        }
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAllPurchases = () => {
+    if (selectedPurchaseIds.size === filteredPurchases.length) {
+      setSelectedPurchaseIds(new Set());
+    } else {
+      setSelectedPurchaseIds(new Set(filteredPurchases.map(p => Number(p.id))));
+    }
+  };
+
+  const handleSort = (column) => {
+    if (sortColumn === column) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortColumn(column);
+      setSortDirection('asc');
+    }
+  };
+
+  const getStatusBadge = (status) => {
+    const styles = {
+      requested: "bg-yellow-100 text-yellow-800",
+      in_warehouse: "bg-blue-100 text-blue-800",
+      fulfilled: "bg-green-100 text-green-800",
+    };
+    const labels = {
+      requested: "Pending",
+      in_warehouse: "In Warehouse",
+      fulfilled: "Fulfilled",
+    };
+    return (
+      <span className={`px-2 py-1 rounded-full text-xs font-semibold ${styles[status]}`}>
+        {labels[status] || status}
+      </span>
+    );
+  };
+
+  async function exportToXLS() {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Purchases");
+
+    worksheet.columns = [
+      { header: "Request ID", key: "id", width: 12 },
+      { header: "Product Code", key: "product_code", width: 15 },
+      { header: "Category", key: "category", width: 12 },
+      { header: "Sub Category", key: "sub_category", width: 18 },
+      { header: "Product Name", key: "product_name", width: 25 },
+      { header: "Quantity", key: "quantity", width: 10 },
+      { header: "Price/Unit", key: "price_per_unit", width: 12 },
+      { header: "Net Amount", key: "net_amount", width: 12 },
+      { header: "Invoice No", key: "invoice_number", width: 18 },
+      { header: "Invoice Date", key: "invoice_date", width: 14 },
+      { header: "From Company", key: "from_company", width: 20 },
+      { header: "Mode of Transport", key: "mode_of_transport", width: 15 },
+      { header: "Status", key: "status_label", width: 12 },
+      { header: "Created By", key: "created_by", width: 15 },
+      { header: "Created At", key: "created_at", width: 20 },
+    ];
+
+    filteredPurchases.forEach((row) =>
+      worksheet.addRow({
+        ...row,
+        category: row.category === "Product" || row.category === "Spare" ? row.category : "",
+        sub_category: row.sub_category || "",
+        status_label: row.status_label || row.status,
+        created_at: new Date(row.created_at).toLocaleString(),
+        invoice_date: formatDisplayDate(row.invoice_date),
+      })
+    );
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "purchases.xlsx";
+    a.click();
+    window.URL.revokeObjectURL(url);
+  }
+
+  function exportToPDF() {
+    const doc = new jsPDF();
+    autoTable(doc, {
+      head: [
+        [
+          "ID",
+          "Product",
+          "Qty",
+          "Amount",
+          "Invoice No",
+          "Invoice Date",
+          "From Company",
+          "Transport",
+          "Status",
+          "Created",
+        ],
+      ],
+      body: filteredPurchases.map((row) => [
+        row.id,
+        row.product_name,
+        row.quantity,
+        row.net_amount,
+        row.invoice_number || "",
+        formatDisplayDate(row.invoice_date),
+        row.from_company,
+        row.mode_of_transport,
+        row.status_label || row.status,
+        formatCrmDateOnly(row.created_at),
+      ]),
+      styles: { fontSize: 8 },
+    });
+    doc.save("purchases.pdf");
+  }
+
+  function getFileType(url) {
+    if (!url) return null;
+    const ext = url.split(".").pop().toLowerCase();
+    if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) return "image";
+    if (ext === "pdf") return "pdf";
+    return "unknown";
+  }
+
+  return (
+    <div className="max-w-full mx-auto p-6">
+      {/* Fixed hover image portal — desktop only */}
+      {hoveredImg && (
+        <div
+          className="pointer-events-none fixed z-[9999]"
+          style={{
+            left: hoveredImg.x,
+            top: hoveredImg.y - 8,
+            transform: "translate(-50%, -100%)",
+          }}
+        >
+          <img
+            src={hoveredImg.src}
+            alt="preview"
+            className="w-52 h-52 object-contain rounded-xl border-2 border-gray-300 shadow-2xl bg-white p-1"
+          />
+        </div>
+      )}
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-800">All Purchase Requests</h1>
+        <p className="text-gray-600 mt-1">View and manage all stock purchase requests</p>
+      </div>
+
+      {/* Filters and Search */}
+      <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm mb-6">
+        <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+          <div className="flex flex-wrap gap-2 items-center">
+            <div className="relative">
+              <Search className="absolute left-2 top-2.5 h-4 w-4 text-gray-500" />
+              <input
+                type="text"
+                placeholder="Search..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-8 pr-3 py-1.5 border rounded-md text-sm w-64"
+              />
+            </div>
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-gray-500 whitespace-nowrap">Created Date:</span>
+              <TypeableDateFilterInput value={startDate} onChange={setStartDate} className="px-3 py-1.5 border rounded-md text-sm"/>
+              <span className="text-xs text-gray-400">to</span>
+              <TypeableDateFilterInput value={endDate} onChange={setEndDate} className="px-3 py-1.5 border rounded-md text-sm"/>
+              {(startDate || endDate) && (
+                <button
+                  onClick={() => { setStartDate(""); setEndDate(""); }}
+                  className="px-2 py-1.5 text-sm rounded bg-red-100 text-red-700 hover:bg-red-200"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-gray-500 whitespace-nowrap">Invoice No:</span>
+              <input
+                type="text"
+                placeholder="Search invoice no..."
+                value={invoiceNumberFilter}
+                onChange={(e) => setInvoiceNumberFilter(e.target.value)}
+                className="px-3 py-1.5 border rounded-md text-sm w-44"
+              />
+              {invoiceNumberFilter && (
+                <button
+                  onClick={() => setInvoiceNumberFilter("")}
+                  className="px-2 py-1.5 text-sm rounded bg-red-100 text-red-700 hover:bg-red-200"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-gray-500 whitespace-nowrap">Invoice Date:</span>
+              <TypeableDateFilterInput value={invoiceDateStart} onChange={setInvoiceDateStart} className="px-3 py-1.5 border rounded-md text-sm"/>
+              <span className="text-xs text-gray-400">to</span>
+              <TypeableDateFilterInput value={invoiceDateEnd} onChange={setInvoiceDateEnd} className="px-3 py-1.5 border rounded-md text-sm"/>
+              {(invoiceDateStart || invoiceDateEnd) && (
+                <button
+                  onClick={() => { setInvoiceDateStart(""); setInvoiceDateEnd(""); }}
+                  className="px-2 py-1.5 text-sm rounded bg-red-100 text-red-700 hover:bg-red-200"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="px-3 py-1.5 border rounded-md text-sm bg-white"
+            >
+              <option value="all">All Categories</option>
+              <option value="Product">Product</option>
+              <option value="Spare">Spare</option>
+              <option value="Other">Other</option>
+            </select>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setStatusFilter("all")}
+                className={`px-3 py-1.5 text-sm rounded ${statusFilter === "all"
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                  }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setStatusFilter("requested")}
+                className={`px-3 py-1.5 text-sm rounded ${statusFilter === "requested"
+                  ? "bg-yellow-600 text-white"
+                  : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                  }`}
+              >
+                Pending
+              </button>
+              <button
+                onClick={() => setStatusFilter("in_warehouse")}
+                className={`px-3 py-1.5 text-sm rounded ${statusFilter === "in_warehouse"
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                  }`}
+              >
+                In Warehouse
+              </button>
+              <button
+                onClick={() => setStatusFilter("fulfilled")}
+                className={`px-3 py-1.5 text-sm rounded ${statusFilter === "fulfilled"
+                  ? "bg-green-600 text-white"
+                  : "bg-gray-200 text-gray-800 hover:bg-gray-300"
+                  }`}
+              >
+                Fulfilled
+              </button>
+            </div>
+
+            <div className="relative">
+              <button
+                onClick={() => setShowExportOptions((prev) => !prev)}
+                className="bg-blue-600 text-white px-3 py-1.5 rounded-md hover:bg-blue-700 flex items-center gap-1 text-sm"
+              >
+                <Download className="w-4 h-4" /> Export
+              </button>
+              {showExportOptions && (
+                <div className="absolute right-0 mt-2 w-40 bg-white border border-gray-200 rounded shadow-md z-10">
+                  <button
+                    onClick={() => {
+                      exportToPDF();
+                      setShowExportOptions(false);
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
+                  >
+                    Export as PDF
+                  </button>
+                  <button
+                    onClick={() => {
+                      exportToXLS();
+                      setShowExportOptions(false);
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100"
+                  >
+                    Export as XLS
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="text-sm text-gray-600">
+            {infiniteScroll
+              ? `Showing ${filteredPurchases.length} filtered · Loaded ${purchases.length}${totalCount != null ? ` of ${totalCount}` : ""} requests`
+              : `Showing ${filteredPurchases.length} of ${purchases.length} requests`}
+          </div>
+        </div>
+        
+        {/* Totals Display */}
+        <div className="flex flex-wrap gap-4 p-3 bg-blue-50 rounded-md border border-blue-200">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-700">Total Quantity:</span>
+            <span className="text-sm font-bold text-blue-700">{totals.totalQty.toLocaleString()}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-700">Total Price/Unit:</span>
+            <span className="text-sm font-bold text-purple-700">₹{totals.totalPricePerUnit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-gray-700">Total Amount:</span>
+            <span className="text-sm font-bold text-green-700">₹{totals.totalAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+          </div>
+          {selectedPurchaseIds.size > 0 && (
+            <div className="flex items-center gap-2 bg-purple-50 px-3 py-2 rounded-md border border-purple-200">
+              <span className="text-sm font-medium text-purple-700">Selected Total:</span>
+              <span className="text-sm font-bold text-purple-800">₹{selectedTotals.selectedNetAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              <button
+                onClick={() => setIsMultiLinkModalOpen(true)}
+                className="ml-2 text-purple-700 hover:text-purple-900"
+                title="Link Payment"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+        {loading ? (
+          <div className="p-8 text-center text-gray-500">Loading...</div>
+        ) : filteredPurchases.length === 0 ? (
+          <div className="p-8 text-center text-gray-500">
+            {search || statusFilter !== "all" || categoryFilter !== "all" ? "No purchases found matching your filters" : "No purchase requests yet"}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-100 text-left">
+                <tr>
+                  <th className="p-3 border-b">
+                    <input
+                      type="checkbox"
+                      checked={filteredPurchases.length > 0 && selectedPurchaseIds.size === filteredPurchases.length}
+                      onChange={toggleSelectAllPurchases}
+                      className="w-4 h-4 cursor-pointer"
+                    />
+                  </th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('id')}>ID {sortColumn === 'id' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('product_code')}>Product Code {sortColumn === 'product_code' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold">Image</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('category')}>Category {sortColumn === 'category' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('sub_category')}>Sub Category {sortColumn === 'sub_category' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('product_name')}>Product Name {sortColumn === 'product_name' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold">Customer Details</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('quantity')}>Qty {sortColumn === 'quantity' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('price_per_unit')}>Price/Unit {sortColumn === 'price_per_unit' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('net_amount')}>Net Amount {sortColumn === 'net_amount' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200">Paid Amount</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200">Remaining Amount</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('invoice_number')}>Invoice No {sortColumn === 'invoice_number' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('invoice_date')}>Invoice Date {sortColumn === 'invoice_date' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('from_company')}>From Company {sortColumn === 'from_company' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('mode_of_transport')}>Transport {sortColumn === 'mode_of_transport' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('status')}>Status {sortColumn === 'status' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('created_by')}>Created By {sortColumn === 'created_by' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold cursor-pointer hover:bg-gray-200" onClick={() => handleSort('created_at')}>Created At {sortColumn === 'created_at' && (sortDirection === 'asc' ? '↑' : '↓')}</th>
+                  <th className="p-3 border-b font-semibold">Payment Trans ID</th>
+                  <th className="p-3 border-b font-semibold">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredPurchases.map((purchase) => {
+                  const isChild = !!purchase.parent_id;
+                  const isParent = purchases.some(p => p.parent_id === purchase.id);
+                  const { category, sub_category } = resolvePurchaseCategory(purchase);
+                  return (
+                    <tr key={purchase.id} className={`border-t hover:bg-gray-50 ${isChild ? 'bg-gray-50' : ''}`}>
+                      <td className="p-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedPurchaseIds.has(Number(purchase.id))}
+                          onChange={() => togglePurchaseSelection(Number(purchase.id))}
+                          className="w-4 h-4 cursor-pointer"
+                        />
+                      </td>
+                      <td className="p-3">
+                        <div className="flex items-center gap-2">
+                          {isChild && <span className="text-gray-400 text-xs pl-4">↳ Child of #{purchase.parent_id}</span>}
+                          <span className={`${isChild ? 'text-gray-500' : 'font-semibold'}`}>#{purchase.id}</span>
+                          {isParent && <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs">Parent</span>}
+                        </div>
+                      </td>
+                      <td className="p-3 font-medium">{purchase.product_code}</td>
+                      <td className="p-3 text-center">
+                        {(() => {
+                          const imgSrc = purchase.catalog_image
+                            ? resolvePurchaseFileUrl(purchase.catalog_image)
+                            : purchase.product_image
+                            ? resolvePurchaseFileUrl(purchase.product_image)
+                            : null;
+                          if (!imgSrc) return <span className="text-gray-400">—</span>;
+                          return (
+                            <div className="relative inline-block group">
+                              <button
+                                onClick={() =>
+                                  setPreviewImage({
+                                    url: imgSrc,
+                                    type: getFileType(imgSrc),
+                                  })
+                                }
+                                onMouseEnter={(e) => {
+                                  if (window.innerWidth < 768) return;
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setHoveredImg({ src: imgSrc, x: rect.left + rect.width / 2, y: rect.top });
+                                }}
+                                onMouseLeave={() => setHoveredImg(null)}
+                                title="Click to view full"
+                              >
+                                <img
+                                  src={imgSrc}
+                                  alt="Product"
+                                  className="w-12 h-12 object-cover rounded border"
+                                  onError={(e) => { e.currentTarget.parentElement.parentElement.style.display = "none"; }}
+                                />
+                              </button>
+                            </div>
+                          );
+                        })()}
+                      </td>
+                      <td className="p-3">
+                        {category === 'Product' ? (
+                          <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+                            Product
+                          </span>
+                        ) : category === 'Spare' ? (
+                          <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">
+                            Spare
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">—</span>
+                        )}
+                      </td>
+                      <td className="p-3">
+                        {sub_category ? (
+                          <span className="px-2 py-0.5 rounded text-xs font-medium bg-violet-100 text-violet-700 border border-violet-200">
+                            {sub_category}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">—</span>
+                        )}
+                      </td>
+                      <td className="p-3">{purchase.product_name}</td>
+                      <td className="p-3">
+                        <div className="flex items-start gap-2">
+                          <div className="space-y-1 flex-1">
+                            {purchase.customer_id && <div className="text-xs text-gray-600"><span className="font-semibold">ID:</span> {purchase.customer_id}</div>}
+                            {purchase.client_name && <div className="text-sm"><span className="font-semibold">Name:</span> {purchase.client_name}</div>}
+                            {purchase.client_company_name && <div className="text-sm"><span className="font-semibold">Company:</span> {purchase.client_company_name}</div>}
+                            {purchase.client_number && <div className="text-xs text-gray-600"><span className="font-semibold">Phone:</span> {purchase.client_number}</div>}
+                            {purchase.client_email && <div className="text-xs text-gray-600"><span className="font-semibold">Email:</span> {purchase.client_email}</div>}
+                            {purchase.client_gstin && <div className="text-xs text-gray-600"><span className="font-semibold">GSTIN:</span> {purchase.client_gstin}</div>}
+                            {!purchase.customer_id && !purchase.client_name && !purchase.client_company_name && !purchase.client_number && !purchase.client_email && !purchase.client_gstin && <span className="text-gray-400">—</span>}
+                          </div>
+                          {(() => {
+                            const isChild = !!purchase.parent_id;
+                            return (
+                              <button
+                                onClick={() => { setEditCustomerRecord(purchase); setEditCustomerOpen(true); }}
+                                className="text-blue-600 hover:text-blue-800"
+                                title="Edit Customer"
+                              >
+                                <Edit2 className="w-4 h-4" />
+                              </button>
+                            );
+                          })()}
+                        </div>
+                      </td>
+                      <td className="p-3">{purchase.quantity}</td>
+                      <td className="p-3">₹{Number(purchase.price_per_unit).toFixed(2)}</td>
+                      <td className="p-3 font-semibold">₹{Number(purchase.net_amount).toFixed(2)}</td>
+                      <td className="p-3 font-medium text-green-700">₹{Number(purchase.paid_amount || 0).toFixed(2)}</td>
+                      <td className="p-3 font-medium text-orange-600">₹{Number(purchase.remaining_amount || (Number(purchase.net_amount) - Number(purchase.paid_amount || 0))).toFixed(2)}</td>
+                      <td className="p-3">{purchase.invoice_number || "—"}</td>
+                      <td className="p-3">{formatDisplayDate(purchase.invoice_date)}</td>
+                      <td className="p-3">{purchase.from_company || "—"}</td>
+                      <td className="p-3">{purchase.mode_of_transport || "—"}</td>
+                      <td className="p-3">{getStatusBadge(purchase.status)}</td>
+                      <td className="p-3">{purchase.created_by}</td>
+                      <td className="p-3">{new Date(purchase.created_at).toLocaleDateString('en-IN', { timeZone: 'UTC' })}</td>
+                      <td className="p-3 font-mono text-xs">
+                        {paymentTransByPurchaseId?.[Number(purchase.id)] ? paymentTransByPurchaseId[Number(purchase.id)] : "—"}
+                      </td>
+                      <td className="p-3">
+                        <div className="flex flex-col gap-1">
+                          {(() => {
+                            const isParent = purchases.some(p => p.parent_id === purchase.id);
+                            if (isChild) {
+                              return <span className="text-xs text-gray-500">Managed via Parent #{purchase.parent_id}</span>;
+                            } else if (isParent) {
+                              return <span className="text-xs text-gray-500">Manage via Multi-Select</span>;
+                            } else if (linkedPurchaseIds.has(Number(purchase.id))) {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => { setLinkPurchase(purchase); setLinkPaymentOpen(true); }}
+                                  className="text-emerald-700 hover:text-emerald-800 font-medium text-sm flex items-center gap-1"
+                                >
+                                  <Plus className="w-3 h-3" /> Edit/Add Payment
+                                </button>
+                              );
+                            } else {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => { setLinkPurchase(purchase); setLinkPaymentOpen(true); }}
+                                  className="text-blue-600 hover:text-blue-700 font-medium text-sm flex items-center gap-1"
+                                >
+                                  <Plus className="w-3 h-3" /> Link Payment
+                                </button>
+                              );
+                            }
+                          })()}
+                          <div className="flex items-center gap-2 mt-1">
+                            <button
+                              onClick={() => setDetailPurchase(purchase)}
+                              className="text-gray-600 hover:text-gray-800 flex items-center gap-1 text-sm"
+                            >
+                              <Eye className="w-4 h-4" /> View
+                            </button>
+                            <button
+                              onClick={() => { setEditRecord(purchase); setEditOpen(true); }}
+                              className="flex items-center gap-1 text-sm text-purple-600 hover:text-purple-700"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {infiniteScroll && (
+              <div
+                ref={loadMoreRef}
+                className="py-4 text-center text-sm text-gray-500 border-t"
+              >
+                {loadingMore
+                  ? "Loading more…"
+                  : hasMore
+                    ? "Scroll for more"
+                    : purchases.length > 0
+                      ? "All purchases loaded"
+                      : null}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Details Modal */}
+      {detailPurchase && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60" onClick={() => setDetailPurchase(null)}>
+          <div className="bg-white rounded-lg shadow-xl max-w-5xl w-full max-h-[85vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b">
+              <h3 className="text-lg font-semibold">Request #{detailPurchase.id} Details</h3>
+              <button className="text-gray-500" onClick={() => setDetailPurchase(null)}>✕</button>
+            </div>
+
+            {/* Progress */}
+            <div className="p-4">
+              {(() => {
+                const stages = ["requested", "in_warehouse", "fulfilled"];
+                const idx = Math.max(0, stages.indexOf(detailPurchase.status));
+                const percent = ((idx + 1) / stages.length) * 100;
+                return (
+                  <div>
+                    <div className="flex justify-between text-xs text-gray-600 mb-1">
+                      <span>Requested</span>
+                      <span>In Warehouse</span>
+                      <span>Fulfilled</span>
+                    </div>
+                    <div className="w-full h-2 rounded bg-gray-200">
+                      <div className={`h-2 rounded ${idx === 0 ? 'bg-yellow-500' : idx === 1 ? 'bg-blue-500' : 'bg-green-600'}`} style={{ width: percent + '%' }} />
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Info grid */}
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {[
+                ["Product Code", detailPurchase.product_code],
+                ["Category", (() => {
+                  const { category } = resolvePurchaseCategory(detailPurchase);
+                  return category || "—";
+                })()],
+                ["Sub Category", (() => {
+                  const { sub_category } = resolvePurchaseCategory(detailPurchase);
+                  return sub_category || "—";
+                })()],
+                ["Product Name", detailPurchase.product_name],
+                ["Customer ID", detailPurchase.customer_id],
+                ["Client Name", detailPurchase.client_name],
+                ["Client Company Name", detailPurchase.client_company_name],
+                ["Client Number", detailPurchase.client_number],
+                ["Client Email", detailPurchase.client_email],
+                ["GSTIN", detailPurchase.client_gstin],
+                ["Customer Address", detailPurchase.customer_address],
+                ["Quantity", detailPurchase.quantity],
+                ["Price/Unit", `₹${Number(detailPurchase.price_per_unit || 0).toFixed(2)}`],
+                ["Amount/Unit", detailPurchase.amount_per_unit],
+                ["Net Amount", `₹${Number(detailPurchase.net_amount || 0).toFixed(2)}`],
+                ["Invoice Number", detailPurchase.invoice_number],
+                ["Invoice Date", formatDisplayDate(detailPurchase.invoice_date)],
+                ["GST Rate", detailPurchase.gst_rate],
+                ["GST Toggle", detailPurchase.gst_toggle],
+                ["Tax Amount", detailPurchase.tax_amount],
+                ["From Company", detailPurchase.from_company],
+                ["From Address", detailPurchase.from_address],
+                ["Delivery Location", detailPurchase.delivery_location],
+                ["Transport", detailPurchase.mode_of_transport],
+                ["Self Name", detailPurchase.self_name],
+                ["Courier Tracking ID", detailPurchase.courier_tracking_id],
+                ["Courier Company", detailPurchase.courier_company],
+                ["Porter Tracking ID", detailPurchase.porter_tracking_id],
+                ["Porter Contact", detailPurchase.porter_contact],
+                ["Truck Number", detailPurchase.truck_number],
+                ["Driver Name", detailPurchase.driver_name],
+                ["Driver Number", detailPurchase.driver_number],
+                ["Warehouse Name", detailPurchase.warehouse_name],
+                ["Received Quantity", detailPurchase.received_quantity],
+                ["Received Date", detailPurchase.received_date ? new Date(detailPurchase.received_date).toLocaleString() : ''],
+                ["Status", detailPurchase.status],
+                ["Created By", detailPurchase.created_by],
+                ["Created At", new Date(detailPurchase.created_at).toLocaleString()],
+              ].map(([label, value]) => (
+                <div key={label} className="border rounded p-3">
+                  <div className="text-xs text-gray-500">{label}</div>
+                  <div className="text-sm">{value || '—'}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Files */}
+            <div className="p-4">
+              <h4 className="font-semibold mb-2">Files</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {[
+                  ["Quotation", detailPurchase.quotation_upload],
+                  ["Payment Proof", detailPurchase.payment_proof_upload],
+                  ["Invoice", detailPurchase.invoice_upload],
+                  ["Product Image", detailPurchase.product_image],
+                  ["E-Way Bill", detailPurchase.eway_bill],
+                  ["Received Image", detailPurchase.received_image],
+                  ["Supporting Doc", detailPurchase.supporting_doc],
+                ].filter(([, url]) => !!url).map(([label, url]) => (
+                  <div key={label} className="border rounded p-3 relative group">
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="text-xs text-gray-500">{label}</div>
+                      <a 
+                        href={resolvePurchaseFileUrl(url)} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="text-blue-600 hover:text-blue-800 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Open in new tab"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                      </a>
+                    </div>
+                    {(() => {
+                      const safeUrl = resolvePurchaseFileUrl(url);
+                      const type = getFileType(safeUrl || url);
+                      if (type === "image") {
+                        return <img src={safeUrl} alt={label} className="w-full h-40 object-cover rounded cursor-pointer hover:opacity-80" onClick={() => setPreviewImage({ url: safeUrl, type: 'image' })} />;
+                      }
+                      if (type === "pdf") {
+                        return <iframe src={safeUrl} title={label} className="w-full h-40" />;
+                      }
+                      return (
+                        <a href={safeUrl} target="_blank" rel="noreferrer" className="text-blue-600 underline break-all">
+                          {url}
+                        </a>
+                      );
+                    })()}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Transport Modal */}
+      <EditTransportModal open={editOpen} onClose={() => setEditOpen(false)} record={editRecord} onSaved={loadPurchaseData} />
+
+      {/* Edit Customer Modal */}
+      <EditCustomerModal 
+        open={editCustomerOpen} 
+        onClose={() => { setEditCustomerOpen(false); setEditCustomerRecord(null); }} 
+        record={editCustomerRecord} 
+        onSaved={loadPurchaseData} 
+      />
+
+      {/* Link Payment Modal */}
+      <LinkPaymentModal
+        open={linkPaymentOpen}
+        onClose={() => { setLinkPaymentOpen(false); setLinkPurchase(null); }}
+        purchase={linkPurchase}
+        onLinked={markPurchaseLinked}
+        currentStatementIds={paymentStatementByPurchaseId?.[Number(linkPurchase?.id)]}
+        userRole={userRole}
+      />
+
+      {/* Multi Purchase Link Modal */}
+      <MultiPurchaseLinkModal
+        isOpen={isMultiLinkModalOpen}
+        closeModal={() => setIsMultiLinkModalOpen(false)}
+        selectedPurchaseIds={selectedPurchaseIds}
+        selectedNetAmount={selectedTotals.selectedNetAmount}
+        purchases={purchases}
+        onLinkSuccess={() => { setSelectedPurchaseIds(new Set()); loadPurchaseData(); }}
+      />
+
+      {/* Preview Modal */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900 bg-opacity-60"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div
+            className="bg-white p-4 rounded-lg max-w-4xl w-full max-h-[80vh] overflow-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center mb-2">
+              <h4 className="font-semibold">Product Image Preview</h4>
+              <button onClick={() => setPreviewImage(null)}>✕</button>
+            </div>
+            {previewImage.type === "image" ? (
+              <img
+                src={previewImage.url}
+                alt="Preview"
+                className="max-h-[70vh] object-contain mx-auto"
+              />
+            ) : previewImage.type === "pdf" ? (
+              <iframe
+                src={previewImage.url}
+                title="PDF Preview"
+                className="w-full h-[70vh]"
+              />
+            ) : (
+              <p className="text-red-500 text-center mt-4">
+                Cannot preview this file type.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

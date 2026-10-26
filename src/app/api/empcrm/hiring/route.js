@@ -1,0 +1,604 @@
+import { NextResponse } from "next/server";
+import { getDbConnection } from "@/lib/db";
+import { getSessionPayload } from "@/lib/auth";
+import { canAccessHiringModule, isEmpCrmHrAdmin } from "@/lib/hrTargetEligibleRoles";
+import { normalizeRoleKey } from "@/lib/roleKeyUtils";
+import { logHiringCreated, logHiringNoteUpdate, logHiringStatusChange } from "@/lib/hiringStatusHistory";
+import { parseHiringPayload, toMysqlDatetime } from "@/lib/hiringPayload";
+import { omitBlockedDesignations } from "@/lib/designationDedupe";
+import {
+  ensureHiringCandidatesInsertReady,
+  isHiringDuplicatePrimaryZeroError,
+} from "@/lib/ensureHiringCandidatesInsertReady";
+
+function assertHrRole(payload) {
+  if (!payload?.username) {
+    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+  }
+  if (!canAccessHiringModule(payload.role ?? payload.userRole)) {
+    return NextResponse.json({ success: false, error: "Forbidden" }, { status: 403 });
+  }
+  return null;
+}
+
+function isMysqlUnknownColumnError(err) {
+  const msg = `${err?.message || ""} ${err?.sqlMessage || ""}`;
+  return (
+    msg.includes("Unknown column") ||
+    err?.code === "ER_BAD_FIELD_ERROR" ||
+    err?.errno === 1054
+  );
+}
+
+/** Appends MySQL text so the UI shows the real missing column (e.g. created_by, package, hr_interview_score). */
+function hiringUnknownColumnResponse(err) {
+  const mysqlMessage = String(err?.sqlMessage ?? err?.message ?? "").trim();
+  const base =
+    "DB column mismatch. Run empcrm/admin-dashboard/hiring/migration_candidates_pipeline_columns.sql (skip #1060 duplicates). If the column is created_by, run migration_candidates_rename_created_by.sql.";
+  const extra =
+    isMysqlUnknownColumnError(err) && mysqlMessage
+      ? ` ${mysqlMessage}`
+      : isMysqlUnknownColumnError(err)
+        ? ` (MySQL ${err?.code || err?.errno || "bad field"})`
+        : "";
+  return NextResponse.json({ success: false, error: base + extra }, { status: 503 });
+}
+
+/** GET ?year=&month=&interview_mode=&designation= optional filters (date parts match hire, interview, or created date). */
+export async function GET(req) {
+  try {
+    const payload = await getSessionPayload();
+    const denied = assertHrRole(payload);
+    if (denied) return denied;
+
+    const role = normalizeRoleKey(payload.role ?? payload.userRole ?? "");
+    const isSuperadmin = isEmpCrmHrAdmin(role);
+
+    const { searchParams } = new URL(req.url);
+    const entryIdParam = searchParams.get("entryId");
+    if (entryIdParam != null && String(entryIdParam).trim() !== "") {
+      const id = parseInt(entryIdParam, 10);
+      if (!Number.isFinite(id) || id < 1) {
+        return NextResponse.json({ success: false, error: "Valid entryId is required." }, { status: 400 });
+      }
+      const conn = await getDbConnection();
+      const [rows] = await conn.execute(
+        `SELECT h.id, h.created_by,
+         COALESCE(ep.full_name, h.created_by) AS creator_name,
+         ep.designation AS creator_role,
+         h.candidate_name, h.emp_contact, h.designation, h.marital_status,
+         h.experience_type, h.interview_at, h.rescheduled_at, h.next_followup_at, h.interview_mode, h.status, h.tag, h.hire_date, h.\`package\` AS package,
+         h.probation_months, h.selected_resume, h.mgmt_interview_score, h.hr_interview_score, h.hr_score_rating, h.current_salary, h.expected_salary, h.current_location, h.hiring_city, h.note, h.created_at
+         FROM candidates h
+         LEFT JOIN employee_profiles ep ON LOWER(TRIM(ep.username)) = LOWER(TRIM(h.created_by))
+         WHERE h.id = ?${isSuperadmin ? "" : " AND LOWER(TRIM(h.created_by)) = LOWER(TRIM(?))"}`,
+        isSuperadmin ? [id] : [id, payload.username]
+      );
+      if (!rows.length) {
+        return NextResponse.json({ success: false, error: "Record not found." }, { status: 404 });
+      }
+      return NextResponse.json({ success: true, entry: rows[0] });
+    }
+
+    const candidateNameParam = searchParams.get("candidate_name");
+    const empContactParam = searchParams.get("emp_contact");
+    const statusParam = searchParams.get("status");
+    const designationParam = searchParams.get("designation");
+    const modeParam = searchParams.get("interview_mode");
+    const joinFromParam = searchParams.get("join_from");
+    const joinToParam = searchParams.get("join_to");
+    const interviewFromParam = searchParams.get("interview_from");
+    const interviewToParam = searchParams.get("interview_to");
+    const nextFollowupFromParam = searchParams.get("next_followup_from");
+    const nextFollowupToParam = searchParams.get("next_followup_to");
+    const createdFromParam = searchParams.get("created_from");
+    const createdToParam = searchParams.get("created_to");
+    const createdByFilter = searchParams.get("created_by");
+
+    const designationTrimmed =
+      designationParam != null && String(designationParam).trim() !== ""
+        ? String(designationParam).trim()
+        : null;
+    const candidateNameTrimmed =
+      candidateNameParam != null && String(candidateNameParam).trim() !== ""
+        ? String(candidateNameParam).trim()
+        : null;
+    const empContactTrimmed =
+      empContactParam != null && String(empContactParam).trim() !== ""
+        ? String(empContactParam).trim()
+        : null;
+    const statusTrimmed =
+      statusParam != null && String(statusParam).trim() !== ""
+        ? String(statusParam).trim()
+        : null;
+
+    const HIRING_INTERVIEW_MODES = ["Virtual", "Walk-in"];
+    const modeRaw = modeParam != null && String(modeParam).trim() !== "" ? String(modeParam).trim() : null;
+    const modeFilter = modeRaw != null && HIRING_INTERVIEW_MODES.includes(modeRaw) ? modeRaw : null;
+    const isValidDate = (v) => v && /^\d{4}-\d{2}-\d{2}$/.test(v.trim());
+    const joinFrom = isValidDate(joinFromParam) ? joinFromParam.trim() : null;
+    const joinTo = isValidDate(joinToParam) ? joinToParam.trim() : null;
+    const interviewFrom = isValidDate(interviewFromParam) ? interviewFromParam.trim() : null;
+    const interviewTo = isValidDate(interviewToParam) ? interviewToParam.trim() : null;
+    const nextFollowupFrom = isValidDate(nextFollowupFromParam) ? nextFollowupFromParam.trim() : null;
+    const nextFollowupTo = isValidDate(nextFollowupToParam) ? nextFollowupToParam.trim() : null;
+    const createdFrom = isValidDate(createdFromParam) ? createdFromParam.trim() : null;
+    const createdTo = isValidDate(createdToParam) ? createdToParam.trim() : null;
+
+    const conn = await getDbConnection();
+
+    const modeClause = modeFilter ? ` AND interview_mode = ?` : "";
+
+    let distSql = `SELECT DISTINCT TRIM(designation) AS d FROM candidates
+      WHERE 1=1${isSuperadmin ? "" : " AND LOWER(TRIM(created_by)) = LOWER(TRIM(?))"}${modeClause}
+      AND TRIM(COALESCE(designation, '')) != '' ORDER BY d`;
+    const distParams = isSuperadmin ? [] : [payload.username];
+    if (modeFilter) distParams.push(modeFilter);
+    const [distRows] = await conn.execute(distSql, distParams);
+    const designations = omitBlockedDesignations(
+      distRows.map((r) => r.d).filter((x) => x != null && String(x).trim() !== "")
+    );
+
+    // Fetch unique creators (HRs) for superadmin filter
+    let creators = [];
+    if (isSuperadmin) {
+      const [creatorRows] = await conn.execute(
+        `SELECT DISTINCT h.created_by AS username, COALESCE(ep.full_name, h.created_by) AS name
+         FROM candidates h
+         LEFT JOIN employee_profiles ep ON LOWER(TRIM(ep.username)) = LOWER(TRIM(h.created_by))
+         WHERE TRIM(COALESCE(h.created_by, '')) != ''
+         ORDER BY name`
+      );
+      creators = creatorRows;
+    }
+
+    let sql = `SELECT h.id, h.created_by,
+         COALESCE(ep.full_name, h.created_by) AS creator_name,
+         ep.designation AS creator_role,
+         h.candidate_name, h.emp_contact, h.designation, h.marital_status,
+         h.experience_type, h.interview_at, h.rescheduled_at, h.next_followup_at, h.interview_mode, h.status, h.tag, h.hire_date, h.\`package\` AS package,
+         h.probation_months, h.selected_resume, h.mgmt_interview_score, h.hr_interview_score, h.hr_score_rating, h.current_salary, h.expected_salary, h.current_location, h.hiring_city, h.note, h.created_at
+         FROM candidates h
+         LEFT JOIN employee_profiles ep ON LOWER(TRIM(ep.username)) = LOWER(TRIM(h.created_by))
+         WHERE 1=1${isSuperadmin ? "" : " AND LOWER(TRIM(h.created_by)) = LOWER(TRIM(?))"}`;
+    const params = isSuperadmin ? [] : [payload.username];
+
+    if (isSuperadmin && createdByFilter) {
+      sql += ` AND LOWER(TRIM(h.created_by)) = LOWER(TRIM(?))`;
+      params.push(createdByFilter);
+    }
+
+    if (candidateNameTrimmed != null) {
+      sql += ` AND h.candidate_name LIKE ?`;
+      params.push(`%${candidateNameTrimmed}%`);
+    }
+    if (empContactTrimmed != null) {
+      sql += ` AND h.emp_contact LIKE ?`;
+      params.push(`%${empContactTrimmed}%`);
+    }
+    if (statusTrimmed != null) {
+      if (["Didn't receive the call", "Cut the call", "Not reachable"].includes(statusTrimmed)) {
+        sql += ` AND (h.status = ? OR (h.status = 'Have not talked' AND h.tag = ?))`;
+        params.push(statusTrimmed, statusTrimmed);
+      } else {
+        sql += ` AND h.status = ?`;
+        params.push(statusTrimmed);
+      }
+    }
+    if (modeFilter != null) {
+      sql += ` AND h.interview_mode = ?`;
+      params.push(modeFilter);
+    }
+    if (designationTrimmed != null) {
+      sql += ` AND TRIM(h.designation) = ?`;
+      params.push(designationTrimmed);
+    }
+    if (joinFrom) {
+      sql += ` AND h.hire_date >= ?`;
+      params.push(joinFrom);
+    }
+    if (joinTo) {
+      sql += ` AND h.hire_date <= ?`;
+      params.push(joinTo);
+    }
+    if (interviewFrom) {
+      sql += ` AND DATE(h.interview_at) >= ?`;
+      params.push(interviewFrom);
+    }
+    if (interviewTo) {
+      sql += ` AND DATE(h.interview_at) <= ?`;
+      params.push(interviewTo);
+    }
+    if (nextFollowupFrom) {
+      sql += ` AND DATE(h.next_followup_at) >= ?`;
+      params.push(nextFollowupFrom);
+    }
+    if (nextFollowupTo) {
+      sql += ` AND DATE(h.next_followup_at) <= ?`;
+      params.push(nextFollowupTo);
+    }
+    if (createdFrom) {
+      sql += ` AND DATE(h.created_at) >= ?`;
+      params.push(createdFrom);
+    }
+    if (createdTo) {
+      sql += ` AND DATE(h.created_at) <= ?`;
+      params.push(createdTo);
+    }
+
+    const usePagination =
+      searchParams.has("page") || searchParams.has("limit");
+    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(searchParams.get("limit") || "25", 10)),
+    );
+
+    sql += ` ORDER BY COALESCE(h.hire_date, DATE(h.interview_at), DATE(h.created_at)) DESC, h.id DESC`;
+
+    let rows;
+    let pagination;
+    if (usePagination) {
+      const sqlBase = sql.replace(/\s+ORDER BY[\s\S]*$/i, "");
+      const countSql = sqlBase.replace(
+        /^SELECT[\s\S]+?\sFROM\s/i,
+        "SELECT COUNT(*) AS c FROM ",
+      );
+      const [countRows] = await conn.execute(countSql, params);
+      const total = Number(countRows[0]?.c ?? 0);
+      const offset = (page - 1) * limit;
+      [rows] = await conn.execute(`${sql} LIMIT ? OFFSET ?`, [
+        ...params,
+        limit,
+        offset,
+      ]);
+      pagination = {
+        page,
+        limit,
+        total,
+        pages: Math.max(1, Math.ceil(total / limit) || 1),
+      };
+    } else {
+      [rows] = await conn.execute(sql, params);
+    }
+    let next_id = 1;
+    try {
+      const [[row]] = await conn.execute(
+        `SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM candidates`
+      );
+      if (row && Number.isFinite(Number(row.next_id))) next_id = Number(row.next_id);
+    } catch {
+      /* table missing handled below if needed */
+    }
+    return NextResponse.json({
+      success: true,
+      entries: rows,
+      next_id,
+      designations,
+      creators,
+      ...(pagination ? { pagination } : {}),
+    });
+  } catch (error) {
+    console.error("[empcrm/hiring GET]", error);
+    const msg = `${error?.message || ""} ${error?.sqlMessage || ""}`;
+    if (msg.includes("candidates") && msg.includes("doesn't exist")) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Table missing. Run migration: empcrm/admin-dashboard/hiring/migration_candidates.sql",
+        },
+        { status: 503 }
+      );
+    }
+    if (isMysqlUnknownColumnError(error)) {
+      return hiringUnknownColumnResponse(error);
+    }
+    return NextResponse.json({ success: false, error: "Server error" }, { status: 500 });
+  }
+}
+
+export async function POST(request) {
+  try {
+    const payload = await getSessionPayload();
+    const denied = assertHrRole(payload);
+    if (denied) return denied;
+
+    const role = normalizeRoleKey(payload.role ?? payload.userRole ?? "");
+    const isSuperadmin = isEmpCrmHrAdmin(role);
+
+    const body = await request.json();
+    const parsed = parseHiringPayload(body);
+    if ("error" in parsed) {
+      return NextResponse.json({ success: false, error: parsed.error }, { status: 400 });
+    }
+    const d = parsed.data;
+
+    const pool = await getDbConnection();
+    const conn = await pool.getConnection();
+
+    const insertCandidate = async () => {
+      const [result] = await conn.execute(
+        `INSERT INTO candidates (
+        created_by, candidate_name, emp_contact, designation, marital_status,
+        experience_type, interview_at, rescheduled_at, next_followup_at, interview_mode, status, tag, hire_date, \`package\`, probation_months,
+        selected_resume, mgmt_interview_score, hr_interview_score, hr_score_rating, current_salary, expected_salary, current_location, hiring_city, note
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          payload.username,
+          d.candidate_name,
+          d.emp_contact,
+          d.designation,
+          d.marital_status,
+          d.experience_type,
+          toMysqlDatetime(d.interview_at),
+          d.rescheduled_at != null ? toMysqlDatetime(d.rescheduled_at) : null,
+          d.next_followup_at != null ? toMysqlDatetime(d.next_followup_at) : null,
+          d.interview_mode,
+          d.status,
+          d.tag,
+          d.hire_date,
+          d.packageStr,
+          d.probation_months,
+          d.selected_resume,
+          d.mgmt_interview_score,
+          d.hr_interview_score,
+          d.hr_score_rating,
+          d.current_salary,
+          d.expected_salary,
+          d.current_location,
+          d.hiring_city,
+          d.note,
+        ]
+      );
+      const insertId = result.insertId;
+      if (insertId) {
+        await logHiringCreated(conn, insertId, d.status, payload.username, d.note);
+      }
+    };
+
+    try {
+      await ensureHiringCandidatesInsertReady(conn);
+      try {
+        await conn.beginTransaction();
+        await insertCandidate();
+        await conn.commit();
+      } catch (e) {
+        await conn.rollback();
+        if (isHiringDuplicatePrimaryZeroError(e)) {
+          await ensureHiringCandidatesInsertReady(conn);
+          await conn.beginTransaction();
+          await insertCandidate();
+          await conn.commit();
+        } else {
+          throw e;
+        }
+      }
+    } finally {
+      conn.release();
+    }
+
+    return NextResponse.json({ success: true, message: "Record saved." });
+  } catch (error) {
+    console.error("[empcrm/hiring POST]", error);
+    const msg = `${error?.message || ""} ${error?.sqlMessage || ""}`;
+    if (isHiringDuplicatePrimaryZeroError(error)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Could not save (database ID issue). Please try again once; if it repeats, ask admin to repair hiring tables.",
+        },
+        { status: 500 }
+      );
+    }
+    if (msg.includes("candidates") && msg.includes("doesn't exist")) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Table missing. Run migration: empcrm/admin-dashboard/hiring/migration_candidates.sql",
+        },
+        { status: 503 }
+      );
+    }
+    if (isMysqlUnknownColumnError(error)) {
+      if (msg.includes("note") && msg.includes("candidates_followups")) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "History note column missing. Run admin-dashboard/hiring-process/migration_hr_hiring_status_history_note.sql",
+          },
+          { status: 503 }
+        );
+      }
+      return hiringUnknownColumnResponse(error);
+    }
+    if (msg.includes("candidates_followups") && (msg.includes("doesn't exist") || msg.includes("Unknown table"))) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Status history table missing. Run admin-dashboard/hiring-process/migration_hr_hiring_status_history.sql",
+        },
+        { status: 503 }
+      );
+    }
+    return NextResponse.json({ success: false, error: error.message || "Server error" }, { status: 500 });
+  }
+}
+
+/** PATCH: update row by id (own rows only) */
+export async function PATCH(request) {
+  try {
+    const payload = await getSessionPayload();
+    const denied = assertHrRole(payload);
+    if (denied) return denied;
+
+    const role = normalizeRoleKey(payload.role ?? payload.userRole ?? "");
+    const isSuperadmin = isEmpCrmHrAdmin(role);
+
+    const body = await request.json();
+    const id = parseInt(body.id, 10);
+    if (!Number.isFinite(id) || id < 1) {
+      return NextResponse.json({ success: false, error: "Valid id is required." }, { status: 400 });
+    }
+
+    const parsed = parseHiringPayload(body);
+    if ("error" in parsed) {
+      return NextResponse.json({ success: false, error: parsed.error }, { status: 400 });
+    }
+    const d = parsed.data;
+
+    const pool = await getDbConnection();
+    const conn = await pool.getConnection();
+    let result;
+    try {
+      await ensureHiringCandidatesInsertReady(conn);
+      await conn.beginTransaction();
+      const [rows] = await conn.execute(
+        `SELECT status, note FROM candidates WHERE id = ?${isSuperadmin ? "" : " AND LOWER(TRIM(created_by)) = LOWER(TRIM(?))"}`,
+        isSuperadmin ? [id] : [id, payload.username]
+      );
+      if (!rows.length) {
+        await conn.rollback();
+        return NextResponse.json({ success: false, error: "Record not found." }, { status: 404 });
+      }
+      const prevStatus = rows[0].status != null ? String(rows[0].status) : "";
+      const prevNote = rows[0].note != null ? String(rows[0].note) : "";
+
+      const [upd] = await conn.execute(
+        `UPDATE candidates SET
+        candidate_name = ?, emp_contact = ?, designation = ?, marital_status = ?,
+        experience_type = ?, interview_at = ?, rescheduled_at = ?, next_followup_at = ?, interview_mode = ?, status = ?, tag = ?,
+        hire_date = ?, \`package\` = ?, probation_months = ?,
+        selected_resume = ?, mgmt_interview_score = ?, hr_interview_score = ?, hr_score_rating = ?, current_salary = ?, expected_salary = ?, current_location = ?, hiring_city = ?, note = ?
+      WHERE id = ?${isSuperadmin ? "" : " AND LOWER(TRIM(created_by)) = LOWER(TRIM(?))"}`,
+        [
+          d.candidate_name,
+          d.emp_contact,
+          d.designation,
+          d.marital_status,
+          d.experience_type,
+          toMysqlDatetime(d.interview_at),
+          d.rescheduled_at != null ? toMysqlDatetime(d.rescheduled_at) : null,
+          d.next_followup_at != null ? toMysqlDatetime(d.next_followup_at) : null,
+          d.interview_mode,
+          d.status,
+          d.tag,
+          d.hire_date,
+          d.packageStr,
+          d.probation_months,
+          d.selected_resume,
+          d.mgmt_interview_score,
+          d.hr_interview_score,
+          d.hr_score_rating,
+          d.current_salary,
+          d.expected_salary,
+          d.current_location,
+          d.hiring_city,
+          d.note,
+          id,
+          ...(isSuperadmin ? [] : [payload.username]),
+        ]
+      );
+      result = upd;
+      const newNote = d.note != null ? String(d.note) : "";
+      if (upd.affectedRows) {
+        if (prevStatus !== d.status) {
+          await logHiringStatusChange(conn, id, prevStatus, d.status, payload.username, newNote);
+        } else if (prevNote !== newNote) {
+          await logHiringNoteUpdate(conn, id, d.status, payload.username, newNote);
+        }
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    if (!result.affectedRows) {
+      return NextResponse.json({ success: false, error: "Record not found." }, { status: 404 });
+    }
+
+    return NextResponse.json({ success: true, message: "Record updated." });
+  } catch (error) {
+    console.error("[empcrm/hiring PATCH]", error);
+    const msg = `${error?.message || ""} ${error?.sqlMessage || ""}`;
+    if (isHiringDuplicatePrimaryZeroError(error)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Could not update (database ID issue). Please try again once; if it repeats, ask admin to repair hiring tables.",
+        },
+        { status: 500 }
+      );
+    }
+    if (isMysqlUnknownColumnError(error)) {
+      if (msg.includes("note") && msg.includes("candidates_followups")) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "History note column missing. Run admin-dashboard/hiring-process/migration_hr_hiring_status_history_note.sql",
+          },
+          { status: 503 }
+        );
+      }
+      return hiringUnknownColumnResponse(error);
+    }
+    if (msg.includes("candidates_followups") && (msg.includes("doesn't exist") || msg.includes("Unknown table"))) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Status history table missing. Run admin-dashboard/hiring-process/migration_hr_hiring_status_history.sql",
+        },
+        { status: 503 }
+      );
+    }
+    return NextResponse.json({ success: false, error: error.message || "Server error" }, { status: 500 });
+  }
+}
+
+/** DELETE: only Superadmin may delete here. */
+export async function DELETE(req) {
+  try {
+    const payload = await getSessionPayload();
+    if (!payload?.username) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
+    const role = normalizeRoleKey(payload.role ?? payload.userRole ?? "");
+    if (!["SUPERADMIN", "DIRECTOR"].includes(String(role).toUpperCase())) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Hiring records can only be deleted by Superadmin.",
+        },
+        { status: 403 }
+      );
+    }
+
+    const { searchParams } = new URL(req.url);
+    const id = parseInt(searchParams.get("id"), 10);
+    if (!Number.isFinite(id) || id < 1) {
+      return NextResponse.json({ success: false, error: "Valid id is required." }, { status: 400 });
+    }
+
+    const conn = await getDbConnection();
+    const [result] = await conn.execute(`DELETE FROM candidates WHERE id = ?`, [id]);
+
+    if (!result.affectedRows) {
+      return NextResponse.json({ success: false, error: "Record not found." }, { status: 404 });
+    }
+
+    return NextResponse.json({ success: true, message: "Record deleted." });
+  } catch (error) {
+    console.error("[empcrm/hiring DELETE]", error);
+    return NextResponse.json({ success: false, error: "Server error" }, { status: 500 });
+  }
+}

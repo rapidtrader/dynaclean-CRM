@@ -1,0 +1,211 @@
+// app/user-dashboard/page.jsx
+import { cookies } from "next/headers";
+import { jwtVerify } from "jose";
+import { redirect } from "next/navigation";
+import { getDbConnection } from "@/lib/db";
+import { isSalesRole } from "@/lib/isSalesRole";
+import { DASHBOARD_MAP } from "@/components/Dashboards";
+import GemCrmDashboardWrapper from "@/components/GemCrmDashboardWrapper";
+import { getReportingManagerForEmployee } from "@/lib/reportingManager";
+
+const JWT_SECRET = process.env.JWT_SECRET || "your-secret";
+
+export default async function UserDashboardPage() {
+  const cookieStore = await cookies();
+  // ✅ Prioritize impersonation_token over the regular token
+  const token =
+    cookieStore.get("impersonation_token")?.value ||
+    cookieStore.get("token")?.value;
+
+  if (!token) {
+    return <p className="text-red-600">Unauthorized</p>;
+  }
+
+  try {
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(JWT_SECRET)
+    );
+
+    const username = payload.username;
+    const role = payload.role;
+    const roleKey = String(role || "").toUpperCase();
+
+    if (roleKey === "SUPERADMIN") {
+      redirect("/admin-dashboard");
+    }
+
+    if (isSalesRole(role)) {
+      redirect("/sales-dashboard");
+    }
+
+    const connection = await getDbConnection();
+
+    // The SQL query correctly finds the user based on the username from the token
+    const [rows] = await connection.execute(
+      `
+      SELECT username, email, empId, userRole FROM emplist WHERE username = ?
+      UNION
+      SELECT username, email, empId, userRole FROM rep_list WHERE username = ?
+      `,
+      [username, username]
+    );
+
+    const user = rows[0];
+
+    // Fetch reporting manager for the user
+    const reportingManager = await getReportingManagerForEmployee(username);
+
+    // Dispatch Pendings
+    const [dispatchPendings] = await connection.execute(
+      `
+      SELECT COUNT(*) as dispatchPendings FROM dispatch WHERE serial_no IS NULL and stock_deducted = 0
+      `
+    );
+
+    const dispatchPendingsCount = dispatchPendings[0].dispatchPendings;
+
+    // warehouse in pendings spare
+    const [Warehouseinspare] = await connection.execute(
+      `
+      SELECT COUNT(*) as Warehouseinspare FROM spare_stock_request WHERE status != 'fulfilled'
+      `
+    );
+
+    const WarehouseinspareCount = Warehouseinspare[0].Warehouseinspare;
+
+    // warehouse in pendings spare
+    const [Warehouseinproducts] = await connection.execute(
+      `
+      SELECT COUNT(*) as Warehouseinproducts FROM product_stock_request WHERE status != 'fulfilled'
+      `
+    );
+
+    const WarehouseinproductsCount = Warehouseinproducts[0].Warehouseinproducts;
+
+    // Fetch Service Head counts
+    const [serviceCounts] = await connection.execute(
+      `
+  SELECT
+    SUM(status = 'COMPLETED') AS completed_count,
+    SUM(status = 'PENDING FOR SPARES') AS pending_spares_count,
+    SUM(status = 'PENDING') AS pending_count
+  FROM service_records
+  `,
+      []
+    );
+
+    const completedCount = serviceCounts[0].completed_count;
+    const pendingSparesCount = serviceCounts[0].pending_spares_count;
+    const pendingCount = serviceCounts[0].pending_count;
+
+    // Fetch available stock data
+    const [availableStock] = await connection.execute(
+      `
+      SELECT
+        pss.product_code,
+        pl.product_image,
+        pl.item_name,
+        pss.total_quantity as total,
+        pss.Delhi as delhi,
+        pss.South as south,
+        pss.updated_at,
+        ps.location as location
+      FROM product_stock_summary pss
+      LEFT JOIN products_list pl
+          ON pss.product_code = pl.item_code
+      LEFT JOIN product_stock ps
+          ON ps.id = (
+              SELECT id
+              FROM product_stock ps2
+              WHERE ps2.product_code = pss.product_code
+                AND ps2.stock_status = 'in'
+              ORDER BY ps2.updated_at DESC
+              LIMIT 1
+          )
+      ORDER BY pss.updated_at DESC
+      `
+    );
+
+    // Check if user is a reporting manager and fetch pending expenses count
+    const { getReportees } = await import("@/lib/reportingManager");
+    const reportees = await getReportees(username);
+    const hasReportees = reportees.length > 0;
+    
+    let pendingExpensesCount = 0;
+    if (hasReportees) {
+      const today = new Date();
+      const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+      const currentMonthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+      const fromDate = currentMonthStart.toISOString().split('T')[0];
+      const toDate = currentMonthEnd.toISOString().split('T')[0];
+      
+      const placeholders = reportees.map(() => "?").join(", ");
+      const [expenseRows] = await connection.execute(
+        `SELECT COUNT(*) as cnt FROM expenses 
+         WHERE username IN (${placeholders}) 
+         AND approval_status = 'Pending'
+         AND TravelDate >= ? AND TravelDate <= ?`,
+        [...reportees, fromDate, toDate]
+      );
+      pendingExpensesCount = expenseRows[0]?.cnt || 0;
+    }
+
+    // Fetch purchase price data (latest per product)
+    const [purchasePrices] = await connection.execute(
+      `
+      SELECT product_code, price_per_unit 
+      FROM product_stock_request 
+      WHERE (product_code, created_at) IN (
+        SELECT product_code, MAX(created_at) AS latest_created 
+        FROM product_stock_request 
+        WHERE price_per_unit IS NOT NULL 
+        GROUP BY product_code
+      )
+      ORDER BY created_at DESC
+      `
+    );
+
+    // Calculate total available stock price
+    const priceMap = {};
+    purchasePrices.forEach((p) => {
+      if (p.product_code && p.price_per_unit) {
+        priceMap[p.product_code] = Number(p.price_per_unit);
+      }
+    });
+
+    const totalAvailableStockPrice = availableStock.reduce((sum, row) => {
+      const totalQty = (row.delhi || 0) + (row.south || 0);
+      const pricePerUnit = priceMap[row.product_code] || 0;
+      return sum + (totalQty * pricePerUnit);
+    }, 0);
+
+    if (!user) {
+      return <p className="text-red-600">User not found</p>;
+    }
+
+    // Show GEM CRM dashboard for GEM role users
+    if (role === "GEM") {
+      return <GemCrmDashboardWrapper />;
+    }
+
+    const DashboardComponent = DASHBOARD_MAP[role] || DASHBOARD_MAP["DEFAULT"];
+
+    const counts = {
+      dispatch: dispatchPendingsCount,
+      spare: WarehouseinspareCount,
+      products: WarehouseinproductsCount,
+      completed: completedCount,
+      pending: pendingCount,
+      pendingSpares: pendingSparesCount,
+      totalAvailableStockPrice: totalAvailableStockPrice,
+      hasReportees: hasReportees,
+      pendingExpensesCount: pendingExpensesCount,
+    };
+
+    return <DashboardComponent user={user} reportingManager={reportingManager} counts={counts} />;
+  } catch (error) {
+    console.error("Dashboard error:", error.message);
+    return <p className="text-red-600">Failed to load dashboard</p>;
+  }
+}

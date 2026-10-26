@@ -1,0 +1,246 @@
+/** Whole rupees only — decimals drop (e.g. 1166.666 → 1166). */
+export function floorInr(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.floor(x);
+}
+
+/** Parse "18676", "18,676", 18676.5 from DB/forms — avoids NaN from commas. */
+export function parseRupeeAmount(v) {
+  if (v == null || v === "") return null;
+  const s = String(v).replace(/,/g, "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Gross used for Basic/HRA/special split.
+ * Component sum (Basic+HRA+transport+medical+special+bonus) wins when > 0 so
+ * payroll matches the actual structure lines — avoids stale manual gross_salary
+ * (e.g. 18666) while components total 18676.
+ * If sum is 0, falls back to manual gross_salary (gross-only structures).
+ */
+export function getEffectiveGrossSalary(structure) {
+  if (!structure) return null;
+  const sum =
+    floorInr(structure.basic_salary) +
+    floorInr(structure.hra) +
+    floorInr(structure.transport_allowance) +
+    floorInr(structure.medical_allowance) +
+    floorInr(structure.special_allowance) +
+    floorInr(structure.bonus);
+  if (sum > 0) return sum;
+
+  const manual = parseRupeeAmount(structure.gross_salary);
+  if (manual != null && manual > 0) return floorInr(manual);
+  return null;
+}
+
+/** Monthly gross (structure) ≤ this → statutory ESI 0.75% of period gross when ESI enabled; no fixed health. */
+export const LOW_GROSS_PF_MONTHLY_MAX = 21000;
+/** Low-gross ESI (when structure ESI > 0): % of period gross earnings. */
+export const LOW_GROSS_PF_RATE = 0.0075;
+
+/** When PF is at 12% Basic (monthly gross > 21k), health deduction is this fixed amount — not DB column. */
+export const FIXED_HEALTH_INSURANCE_INR = 277;
+
+export function isLowGrossPfMonthly(monthlyGross) {
+  const g = floorInr(monthlyGross);
+  return g > 0 && g <= LOW_GROSS_PF_MONTHLY_MAX;
+}
+
+/** PF: 12% of earned basic (same for monthly gross above or ≤ ₹21k). */
+export function computePfFromGrossAndBasic(
+  _monthlyGrossFromStructure,
+  basicSalary,
+  _totalEarnings,
+) {
+  return floorInr(0.12 * (Number(basicSalary) || 0));
+}
+
+/**
+ * Payroll statutory rows only when structure has that component > 0.
+ * PF: 12% of earned basic if struct PF > 0 (all gross levels).
+ * Low gross ESI: 0.75% of period gross if struct ESI > 0; else struct ESI amount when high gross.
+ * Health: fixed ₹277 only if struct health > 0 and not low gross.
+ */
+export function applyStatutoryDeductionsFromStructure({
+  effectiveGross,
+  structPf,
+  structEsi,
+  structHealthInsurance,
+  basicSalary,
+  totalEarnings,
+}) {
+  const structPfN = floorInr(structPf);
+  const structEsiN = floorInr(structEsi);
+  const structHealthN = floorInr(structHealthInsurance);
+  const lowGrossPfRule = isLowGrossPfMonthly(effectiveGross);
+  const rawPf = computePfFromGrossAndBasic(
+    effectiveGross,
+    basicSalary,
+    totalEarnings,
+  );
+  const pf = structPfN > 0 ? Math.min(rawPf, 1800) : 0;
+  let esi = 0;
+  if (lowGrossPfRule) {
+    esi =
+      structEsiN > 0
+        ? floorInr(LOW_GROSS_PF_RATE * (Number(totalEarnings) || 0))
+        : 0;
+  } else {
+    esi = structEsiN;
+  }
+  const healthInsurance = lowGrossPfRule
+    ? 0
+    : structHealthN > 0
+      ? FIXED_HEALTH_INSURANCE_INR
+      : 0;
+  return { pf, esi, healthInsurance, lowGrossPfRule };
+}
+
+/** Admin salary form: string fields for pf, esi, health_insurance from current component values. */
+export function syncStatutoryFormFieldsFromStructureInput(form) {
+  const eff = getEffectiveGrossSalary({
+    gross_salary: form.gross_salary,
+    basic_salary: form.basic_salary,
+    hra: form.hra,
+    transport_allowance: form.transport_allowance,
+    medical_allowance: form.medical_allowance,
+    special_allowance: form.special_allowance,
+    bonus: form.bonus,
+  });
+  if (eff == null || eff <= 0) {
+    return { pf: "0", esi: "0", health_insurance: "0" };
+  }
+  const basic = floorInr(form.basic_salary);
+  if (isLowGrossPfMonthly(eff)) {
+    return {
+      pf: String(Math.min(floorInr(0.12 * basic), 1800)),
+      esi: String(floorInr(LOW_GROSS_PF_RATE * eff)),
+      health_insurance: "0",
+    };
+  }
+  return {
+    pf: String(Math.min(floorInr(0.12 * basic), 1800)),
+    esi: "0",
+    health_insurance: String(FIXED_HEALTH_INSURANCE_INR),
+  };
+}
+
+export function isHealthInsuranceDeductionRow(d) {
+  const code = String(d?.deduction_code || "");
+  const name = String(d?.deduction_name || "");
+  return (
+    code === "HI" ||
+    code === "HEALTH_INSURANCE" ||
+    (/health/i.test(name) && /insurance/i.test(name))
+  );
+}
+
+/**
+ * Structural line (transport, medical, etc.) for the earning period × working_days denominator.
+ * Matches floor((monthly_amount × present_days) / working_days) — full amount when present_days ≥ working_days.
+ */
+export function proRataMonthlyStructuralLine(amountInr, workingDays, presentDays) {
+  const a = floorInr(amountInr);
+  const wd = Math.max(1, Number(workingDays) || 0);
+  const pd = Math.max(0, Number(presentDays) || 0);
+  if (pd <= 0) return 0;
+  if (pd >= wd) return a;
+  return floorInr((a * pd) / wd);
+}
+
+/**
+ * Pro‑rated gross for partial attendance: round((gross × pay_days) / working_days).
+ * Avoids underpaying when using floor(gross/workingDays)×pay_days (e.g. ₹22,000 / 30 × 29 → ₹21,267 vs ₹21,257).
+ */
+export function payableGrossProRata(grossInt, workingDays, presentDays) {
+  const g = floorInr(grossInt);
+  const wd = Math.max(1, Number(workingDays) || 0);
+  const pd = Math.max(0, Number(presentDays) || 0);
+  if (pd >= wd) return g;
+  return Math.round((g * pd) / wd);
+}
+
+/**
+ * When gross_salary (monthly salary total) is set:
+ * - Gross is taken as whole rupees (no paise).
+ * - Full-month Basic = floor(gross / 2) — e.g. 18676 → 9338 (not 9333 from round(0.5*G)).
+ * - Full-month HRA = floor(gross / 4) — 25% of gross in whole rupees.
+ * Then pro-rate Basic & HRA by present_days / working_days.
+ *
+ * Returns null if gross is not a positive number.
+ */
+export function computeBasicHraFromGrossSalary({
+  grossSalary,
+  workingDays,
+  presentDays,
+}) {
+  const G = Number(grossSalary);
+  if (
+    grossSalary === null ||
+    grossSalary === undefined ||
+    grossSalary === "" ||
+    !Number.isFinite(G) ||
+    G <= 0
+  ) {
+    return null;
+  }
+
+  const g = floorInr(G);
+  const wd = Math.max(1, Number(workingDays) || 0);
+  const pd = Math.max(0, Number(presentDays) || 0);
+  const payableGross = payableGrossProRata(g, wd, pd);
+  const perDayGross = wd > 0 ? Math.round(g / wd) : 0;
+  const basicSalary = Math.floor(payableGross / 2);
+  const hra = Math.floor(payableGross / 4);
+  const fullBasic = Math.floor(g / 2);
+  const fullHra = Math.floor(g / 4);
+  return { basicSalary, hra, fullBasic, fullHra, payableGross, perDayGross };
+}
+
+/**
+ * When salary structure has gross_salary, special allowance is the remainder of pro‑rated gross
+ * after pro‑rated basic+HRA+transport+medical (all use the same present_days / working_days logic when passed in).
+ *
+ * special = gross - (basic + hra + transport + medical) - absentDays * (gross / workingDays)
+ *
+ * If gross is not set, returns fallbackStructureSpecial (structure’s stored special).
+ */
+export function computeSpecialAllowanceFromGross({
+  grossSalary,
+  workingDays,
+  presentDays,
+  basicSalary,
+  hra,
+  transportAllowance,
+  medicalAllowance,
+  fallbackStructureSpecial,
+}) {
+  const gross = Number(grossSalary);
+  if (
+    grossSalary === null ||
+    grossSalary === undefined ||
+    grossSalary === "" ||
+    !Number.isFinite(gross) ||
+    gross <= 0
+  ) {
+    return Math.max(0, floorInr(fallbackStructureSpecial));
+  }
+
+  const g = floorInr(gross);
+  const wd = Math.max(1, Number(workingDays) || 0);
+  const pd = Math.max(0, Number(presentDays) || 0);
+
+  const totalAddition =
+    floorInr(basicSalary) +
+    floorInr(hra) +
+    floorInr(transportAllowance) +
+    floorInr(medicalAllowance);
+
+  const payableGross = payableGrossProRata(g, wd, pd);
+  const raw = payableGross - totalAddition;
+  return Math.max(0, floorInr(raw));
+}

@@ -1,0 +1,183 @@
+import { getDbConnection } from "@/lib/db";
+import CustomerTable from "./CustomerTable"; // Import the new component
+import { getSessionPayload } from "@/lib/auth";
+import { notesLanguageExistsSql } from "@/constants/notesLanguageOptions";
+import { getCurrentMonthRangeIso } from "@/lib/crmDateFormat";
+
+export const dynamic = "force-dynamic";
+
+// This is a Server Component, meaning it runs on the server.
+export default async function HomePage({ searchParams }) {
+  let connection;
+  let customers = [];
+  let leadSources = [];
+  let totalRecords = 0;
+  let totalPages = 1;
+  let error = null;
+
+  let username = "Unknown";
+  let userRole = null;
+  const payload = await getSessionPayload();
+  if (!payload) {
+    return null;
+  }
+  username = payload.username;
+  userRole = payload.role;
+
+  const searchParamsResolved = await searchParams;
+  const {
+    search,
+    lead_source,
+    lead_campaign,
+    status,
+    stage,
+    from,
+    to,
+    tags,
+    notes_language,
+    page = "1",
+  } = searchParamsResolved;
+
+  const currentPage = parseInt(page);
+  const pageSize = 50;
+  const offset = (currentPage - 1) * pageSize;
+
+  const monthDefault = getCurrentMonthRangeIso();
+  const fromDate = from || monthDefault.from;
+  const toDate = to || monthDefault.to;
+
+  try {
+    connection = await getDbConnection();
+
+    // Ensure customer_id column exists in bids table
+    const [bidsTableInfo] = await connection.execute("DESCRIBE bids");
+    const bidsExistingColumns = bidsTableInfo.map(row => row.Field);
+    
+    if (!bidsExistingColumns.includes('customer_id')) {
+      try {
+        await connection.execute(`ALTER TABLE bids ADD COLUMN customer_id VARCHAR(255) NULL`);
+        console.log(`✅ Added column customer_id to bids table`);
+      } catch (alterError) {
+        console.error(`❌ Failed to add column customer_id to bids table:`, alterError.message);
+      }
+    }
+
+    // Build query with filters
+    let query = `
+      SELECT
+        c.customer_id, c.first_name, c.last_name, c.email, c.phone, c.company, c.address, c.tags, c.status, c.stage, c.lead_source, c.service_lead_source, c.lead_campaign, c.date_created, c.notes, c.parent_customer_id,
+        cf.notes AS latest_note,
+        cf.multi_tag AS latest_tags,
+        IFNULL(GROUP_CONCAT(b.bid_number), '') as bid_numbers
+      FROM
+        customers c
+      LEFT JOIN (
+        SELECT
+          customer_id,
+          notes,
+          multi_tag,
+          ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY time_stamp DESC) AS rn
+        FROM
+          customers_followup
+      ) cf ON c.customer_id = cf.customer_id AND cf.rn = 1
+      LEFT JOIN bids b ON c.customer_id = b.customer_id
+      WHERE 1=1
+    `;
+
+    const params = [];
+
+    // Apply filters
+    if (search) {
+      query += ` AND (c.customer_id = ? OR c.phone LIKE ? OR c.first_name LIKE ? OR c.last_name LIKE ? OR c.email LIKE ?)`;
+      const searchTerm = `%${search}%`;
+      params.push(search, searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+
+    if (lead_source) {
+      query += ` AND c.lead_source = ?`;
+      params.push(lead_source);
+    }
+
+    if (lead_campaign) {
+      query += ` AND c.lead_campaign = ?`;
+      params.push(lead_campaign);
+    }
+
+    if (status) {
+      query += ` AND c.status = ?`;
+      params.push(status);
+    }
+
+    if (stage) {
+      query += ` AND c.stage = ?`;
+      params.push(stage);
+    }
+
+    if (fromDate) {
+      query += ` AND c.date_created >= ?`;
+      params.push(fromDate);
+    }
+
+    if (toDate) {
+      query += ` AND c.date_created <= ?`;
+      params.push(`${toDate} 23:59:59`);
+    }
+
+    if (tags) {
+      query += ` AND cf.multi_tag LIKE ?`;
+      params.push(`%${tags}%`);
+    }
+
+    if (notes_language) {
+      query += ` AND ${notesLanguageExistsSql("?")}`;
+      params.push(notes_language);
+    }
+
+    // Get total count
+    let countQuery = query.replace(
+      /SELECT[\s\S]*?FROM\s+customers c/,
+      "SELECT COUNT(*) as total FROM customers c",
+    );
+    const [countResult] = await connection.execute(countQuery, params);
+    totalRecords = countResult[0].total;
+    totalPages = Math.ceil(totalRecords / pageSize);
+
+    // Add pagination
+    query += ` GROUP BY c.customer_id ORDER BY c.date_created DESC LIMIT ? OFFSET ?`;
+    params.push(pageSize, offset);
+
+    const [rows] = await connection.execute(query, params);
+    customers = rows;
+
+    // Fetch lead sources for filter (used as employee list)
+    const [sources] = await connection.execute(
+      `SELECT DISTINCT lead_source FROM customers WHERE lead_source IS NOT NULL ORDER BY lead_source`,
+    );
+    leadSources = sources.map((s) => s.lead_source);
+  } catch (err) {
+    console.error("Database query error:", err);
+    error = "Failed to fetch data from the database.";
+  } finally {
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-3 sm:p-4 md:p-6 lg:p-8">
+      <h2 className="text-xl sm:text-2xl md:text-3xl text-center text-gray-900 mb-2 sm:mb-0.5">All Clients</h2>
+
+      <div className="max-w-7xl mx-auto bg-white shadow-xl rounded-xl p-3 sm:p-4 md:p-6 lg:p-8 overflow-hidden">
+        {/* Render the CustomerTable component, passing the fetched data and error */}
+        <CustomerTable
+          data={customers}
+          error={error}
+          leadSources={leadSources}
+          searchParams={searchParamsResolved}
+          currentPage={currentPage}
+          totalPages={totalPages}
+          totalRecords={totalRecords}
+          pageSize={pageSize}
+          userRole={userRole}
+        />
+      </div>
+    </div>
+  );
+}

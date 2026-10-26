@@ -1,0 +1,616 @@
+import { NextResponse } from "next/server";
+import { getDbConnection } from "@/lib/db";
+import { getSessionPayload } from "@/lib/auth";
+import { canMutateDispatchRole } from "@/lib/roleKeyUtils";
+import { deductCheckedAccessoryStock } from "@/lib/deductAccessoryStock";
+import { isSpare1110 } from "@/lib/isSpare1110";
+import {
+  getGodownLocationColumn,
+  isDelhiGodown,
+  pickRowColumn,
+} from "@/lib/godownStock";
+import { v2 as cloudinary } from "cloudinary";
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+async function uploadPhotoToCloudinary(file) {
+  if (!file || typeof file.arrayBuffer !== "function") return null;
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const base64 = buffer.toString("base64");
+  const dataUri = `data:${file.type};base64,${base64}`;
+  const result = await cloudinary.uploader.upload(dataUri, {
+    folder: "dispatch_photos",
+    resource_type: "image",
+  });
+  return result.secure_url;
+}
+
+async function ensureAccessoriesStockDeductedColumn(conn) {
+  const [cols] = await conn.execute(
+    `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dispatch' AND COLUMN_NAME = 'accessories_stock_deducted'`,
+  );
+  if (cols.length === 0) {
+    await conn.execute(
+      `ALTER TABLE dispatch ADD COLUMN accessories_stock_deducted TINYINT(1) NOT NULL DEFAULT 0
+       COMMENT '1 = accessory spare stock deducted for this dispatch row' AFTER stock_deducted`,
+    );
+  }
+}
+
+export async function POST(req) {
+  try {
+    const tokenPayload = await getSessionPayload();
+    if (!tokenPayload)
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const role = tokenPayload.role;
+    const username = tokenPayload.username;
+    if (!canMutateDispatchRole(role)) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const formData = await req.formData();
+    const id = formData.get("id");
+    const serialNo = formData.get("serial_no");
+    const remarks = formData.get("remarks");
+    const godown = formData.get("godown");
+    const accessoriesChecklist = formData.get("accessories_checklist");
+
+    // Photos: multiple files under key "photos"
+    const photoFiles = formData.getAll("photos").filter(
+      (f) => f && typeof f.arrayBuffer === "function" && f.size > 0
+    );
+
+    const photoUrls = [];
+    for (const f of photoFiles) {
+      const url = await uploadPhotoToCloudinary(f);
+      if (url) photoUrls.push(url);
+    }
+
+    if (!godown) {
+      return NextResponse.json(
+        { error: "Godown selection is required" },
+        { status: 400 }
+      );
+    }
+
+    const conn = await getDbConnection();
+    await ensureAccessoriesStockDeductedColumn(conn);
+
+    // Retrieve previous photos and deduction flags
+    const [rows] = await conn.execute(
+      `SELECT photos, stock_deducted, accessories_stock_deducted FROM dispatch WHERE id = ?`,
+      [id],
+    );
+    const prevPhotos =
+      rows && rows[0] && rows[0].photos ? rows[0].photos : null;
+    const stockAlreadyDeducted =
+      rows && rows[0] && rows[0].stock_deducted === 1;
+    const accessoriesStockAlreadyDeducted =
+      rows && rows[0] && rows[0].accessories_stock_deducted === 1;
+
+    let newPhotos = null;
+    if (photoUrls.length) {
+      if (prevPhotos) {
+        newPhotos = prevPhotos + "," + photoUrls.join(",");
+      } else {
+        newPhotos = photoUrls.join(",");
+      }
+    } else {
+      newPhotos = prevPhotos; // keep existing if none uploaded
+    }
+
+    // Fetch dispatch row to know what item to deduct and quote link
+    const [dispatchRows] = await conn.execute(
+      `SELECT id, quote_number, item_code, item_name, godown FROM dispatch WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    if (!dispatchRows || !dispatchRows[0]) {
+      return NextResponse.json(
+        { error: "Dispatch row not found" },
+        { status: 404 }
+      );
+    }
+
+    const dispatchRow = dispatchRows[0];
+    const quoteNumber = dispatchRow.quote_number;
+    let itemCode = dispatchRow.item_code;
+
+    // Get the correct product_code from products_list
+    // The dispatch might have full name like "Electric Road Sweeper DRS-3000EV"
+    // but products_list might have just "DRS-3000EV"
+    const [productCheck] = await conn.execute(
+      `SELECT item_code, item_name FROM products_list WHERE item_code = ? OR item_name = ?`,
+      [itemCode, itemCode]
+    );
+    if (productCheck.length > 0) {
+      itemCode = productCheck[0].item_code;
+      console.log("Dispatch stock deduction - Original:", dispatchRow.item_code, "Actual:", itemCode);
+    }
+
+    const [orderRows] = await conn.execute(
+      `SELECT id, order_id FROM neworder WHERE quote_number = ? LIMIT 1`,
+      [quoteNumber]
+    );
+
+    const orderRow = orderRows[0];
+    const orderNumber = orderRow?.order_id;
+
+    const [quoteMetaRows] = await conn.execute(
+      `SELECT company_name, company_address FROM quotations_records WHERE quote_number = ?`,
+      [quoteNumber],
+    );
+    const companyName =
+      quoteMetaRows && quoteMetaRows[0] ? quoteMetaRows[0].company_name : null;
+    const companyAddress =
+      quoteMetaRows && quoteMetaRows[0]
+        ? quoteMetaRows[0].company_address
+        : null;
+
+    const isProduct = /[a-zA-Z]/.test(itemCode);
+    const [spareMetaRows] = await conn.execute(
+      `SELECT id, spare_number FROM spare_list
+       WHERE CAST(spare_number AS CHAR) = ? OR CAST(id AS CHAR) = ?
+       LIMIT 1`,
+      [String(dispatchRow.item_code), String(dispatchRow.item_code)],
+    );
+    const skipStockDeduction = isSpare1110(
+      dispatchRow.item_code,
+      spareMetaRows[0]?.spare_number,
+    );
+
+    // STEP 1: Validate and update dispatch details FIRST (this checks serial_no uniqueness)
+    if (stockAlreadyDeducted) {
+      await conn.execute(
+        `UPDATE dispatch SET serial_no = ?, remarks = ?, photos = ?, accessories_checklist = ?, updated_at = NOW() WHERE id = ?`,
+        [
+          serialNo ?? null,
+          remarks ?? null,
+          newPhotos ?? null,
+          accessoriesChecklist ?? null,
+          id,
+        ],
+      );
+
+      // Product stock already deducted — still deduct accessory stock if pending
+      if (
+        !accessoriesStockAlreadyDeducted &&
+        accessoriesChecklist &&
+        isProduct
+      ) {
+        const accessoryResult = await deductCheckedAccessoryStock(conn, {
+          accessoriesChecklistJson: accessoriesChecklist,
+          productCode: itemCode,
+          godown,
+          quoteNumber,
+          orderNumber,
+          username,
+          dispatchRowId: id,
+          companyName,
+          companyAddress,
+          partial: true,
+        });
+
+        await conn.execute(
+          `UPDATE dispatch SET accessories_stock_deducted = 1, updated_at = NOW() WHERE id = ?`,
+          [id],
+        );
+
+        return NextResponse.json({
+          success: true,
+          note: "Accessory stock deducted",
+          accessories_deducted: accessoryResult.deducted,
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        note: "Stock already deducted, only updated dispatch details",
+      });
+    }
+
+    // Update dispatch record (including godown) WITHOUT marking stock_deducted yet (validates serial_no uniqueness)
+    await conn.execute(
+      `UPDATE dispatch SET serial_no = ?, remarks = ?, photos = ?, godown = ?, accessories_checklist = ?, updated_at = NOW() WHERE id = ?`,
+      [
+        serialNo ?? null,
+        remarks ?? null,
+        newPhotos ?? null,
+        godown ?? null,
+        accessoriesChecklist ?? null,
+        id,
+      ]
+    );
+
+    if (skipStockDeduction) {
+      await conn.execute(
+        `UPDATE dispatch SET stock_deducted = 1, updated_at = NOW() WHERE id = ?`,
+        [id],
+      );
+
+      return NextResponse.json({
+        success: true,
+        note: "Spare 1110 saved without stock deduction",
+      });
+    }
+
+    // STEP 2: If we reach here, serial_no is valid. Now proceed with stock deduction
+    // Determine item info from quotation
+    // Note: Each dispatch row represents ONE item, so quantity is always 1
+    const [itemRows] = await conn.execute(
+      `SELECT item_code, total_price, hsn_sac FROM quotation_items WHERE quote_number = ? AND item_code = ?`,
+      [quoteNumber, itemCode]
+    );
+
+    const [quoteMetaRowsFull] = await conn.execute(
+      `SELECT company_name, company_address, gstin FROM quotations_records WHERE quote_number = ?`,
+      [quoteNumber],
+    );
+
+    if (!itemRows || !itemRows[0]) {
+      return NextResponse.json({
+        success: true,
+        note: "No matching item to deduct",
+      });
+    }
+
+    const { total_price, hsn_sac } = itemRows[0];
+    const quantity = 1; // Each dispatch row is for ONE item
+    const gstin =
+      quoteMetaRowsFull && quoteMetaRowsFull[0]
+        ? quoteMetaRowsFull[0].gstin
+        : null;
+
+    const locationColumn = getGodownLocationColumn(godown);
+    const isDelhi = isDelhiGodown(godown);
+
+    if (isProduct) {
+      const [rows] = await conn.execute(
+        `SELECT total_quantity, ${locationColumn} FROM product_stock_summary
+         WHERE product_code = ?`,
+        [itemCode]
+      );
+
+      let totalDB = 0;
+      let locationDB = 0;
+      let delhiDB = 0;
+      let southDB = 0;
+      if (rows.length > 0) {
+        totalDB = Number(rows[0].total_quantity || 0);
+        locationDB = pickRowColumn(rows[0], locationColumn);
+        delhiDB = pickRowColumn(rows[0], "Delhi");
+        southDB = pickRowColumn(rows[0], "South");
+      }
+
+      const newLocationStock = locationDB - quantity;
+      const totalD = totalDB - quantity;
+      const delhiD = isDelhi ? newLocationStock : delhiDB;
+      const southD = isDelhi ? southDB : newLocationStock;
+
+      await conn.execute(
+        `INSERT INTO product_stock
+          (product_code, quantity, amount_per_unit, net_amount, note, location, stock_status, gst, hs_code, to_company, delivery_address, quotation_id, order_id, added_by, godown, total, delhi, south)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          itemCode,
+          quantity,
+          total_price,
+          total_price,
+          "Dispatch Update",
+          "Dispatch",
+          "OUT",
+          gstin,
+          hsn_sac,
+          companyName,
+          companyAddress,
+          quoteNumber,
+          orderNumber,
+          username,
+          godown,
+          totalD,
+          delhiD,
+          southD,
+        ]
+      );
+
+      const [summary] = await conn.execute(
+        `SELECT total_quantity, ${locationColumn} FROM product_stock_summary WHERE product_code = ?`,
+        [itemCode]
+      );
+      if (summary.length > 0) {
+        const prevTotal = Number(summary[0].total_quantity || 0);
+        const newTotal = Math.max(prevTotal - quantity, 0);
+        const prev = pickRowColumn(summary[0], locationColumn);
+        const newv = Math.max(prev - quantity, 0);
+        await conn.execute(
+          `UPDATE product_stock_summary 
+            SET last_updated_quantity = ?, total_quantity = ?, last_status = ?, updated_at = NOW(), ${locationColumn} = ?
+            WHERE product_code = ?`,
+          [quantity, newTotal, "OUT", newv, itemCode]
+        );
+      }
+    } else {
+      // Verify the spare_id actually exists in spare_list before inserting into stock_list
+      const [spareCheck] = await conn.execute(
+        `SELECT id, spare_number FROM spare_list
+         WHERE CAST(spare_number AS CHAR) = ? OR CAST(id AS CHAR) = ?
+         LIMIT 1`,
+        [String(itemCode), String(itemCode)],
+      );
+
+      if (spareCheck.length === 0) {
+        // spare not found in spare_list — could be a product with a numeric code
+        // Fall back to product_stock deduction using item_name lookup
+        console.warn(`spare ${itemCode} not found in spare_list. Attempting product stock fallback.`);
+
+        const [productFallback] = await conn.execute(
+          `SELECT item_code FROM products_list WHERE item_name LIKE ? LIMIT 1`,
+          [`%${dispatchRow.item_name}%`]
+        );
+
+        if (productFallback.length > 0) {
+          const fallbackCode = productFallback[0].item_code;
+          console.log(`Fallback item_code found: ${fallbackCode} for item: ${dispatchRow.item_name}`);
+
+          const [fallbackStock] = await conn.execute(
+            `SELECT total_quantity, ${locationColumn} FROM product_stock_summary WHERE product_code = ?`,
+            [fallbackCode]
+          );
+
+          let totalDB = 0;
+          let locationDB = 0;
+          let delhiDB = 0;
+          let southDB = 0;
+          if (fallbackStock.length > 0) {
+            totalDB = Number(fallbackStock[0].total_quantity || 0);
+            locationDB = pickRowColumn(fallbackStock[0], locationColumn);
+            delhiDB = pickRowColumn(fallbackStock[0], "Delhi");
+            southDB = pickRowColumn(fallbackStock[0], "South");
+          }
+
+          const newLocationStock = locationDB - quantity;
+          const totalD = totalDB - quantity;
+          const delhiD = isDelhi ? newLocationStock : delhiDB;
+          const southD = isDelhi ? southDB : newLocationStock;
+
+          await conn.execute(
+            `INSERT INTO product_stock
+              (product_code, quantity, amount_per_unit, net_amount, note, location, stock_status, gst, hs_code, to_company, delivery_address, quotation_id, order_id, added_by, godown, total, delhi, south)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              fallbackCode,
+              quantity,
+              total_price,
+              total_price,
+              "Dispatch Update",
+              "Dispatch",
+              "OUT",
+              gstin,
+              hsn_sac,
+              companyName,
+              companyAddress,
+              quoteNumber,
+              orderNumber,
+              username,
+              godown,
+              totalD,
+              delhiD,
+              southD,
+            ]
+          );
+
+          if (fallbackStock.length > 0) {
+            const prevTotal = Number(fallbackStock[0].total_quantity || 0);
+            const newTotal = Math.max(prevTotal - quantity, 0);
+            const prev = pickRowColumn(fallbackStock[0], locationColumn);
+            const newv = Math.max(prev - quantity, 0);
+            await conn.execute(
+              `UPDATE product_stock_summary 
+                SET last_updated_quantity = ?, total_quantity = ?, last_status = ?, updated_at = NOW(), ${locationColumn} = ?
+                WHERE product_code = ?`,
+              [quantity, newTotal, "OUT", newv, fallbackCode]
+            );
+          }
+        } else {
+          // No match found anywhere — skip stock deduction and log
+          console.warn(`No product or spare found for item_code=${itemCode}, item_name=${dispatchRow.item_name}. Skipping stock deduction.`);
+        }
+      } else {
+        // spare exists — proceed normally
+        const spareId = spareCheck[0].id;
+        const [rows] = await conn.execute(
+          `SELECT total_quantity, ${locationColumn} FROM stock_summary
+           WHERE spare_id = ?`,
+          [spareId]
+        );
+
+        let totalDB = 0;
+        let locationDB = 0;
+        let delhiDB = 0;
+        let southDB = 0;
+        if (rows.length > 0) {
+          totalDB = Number(rows[0].total_quantity || 0);
+          locationDB = pickRowColumn(rows[0], locationColumn);
+          delhiDB = pickRowColumn(rows[0], "Delhi");
+          southDB = pickRowColumn(rows[0], "South");
+        }
+
+        const newLocationStock = locationDB - quantity;
+        const totalD = totalDB - quantity;
+        const delhiD = isDelhi ? newLocationStock : delhiDB;
+        const southD = isDelhi ? southDB : newLocationStock;
+
+        await conn.execute(
+          `INSERT INTO stock_list
+            (spare_id, quantity, amount_per_unit, net_amount, note, location, stock_status, to_company, delivery_address, quotation_id, order_id, added_by, godown, total, delhi, south)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            spareId,
+            quantity,
+            total_price,
+            total_price,
+            "Dispatch Update",
+            "Dispatch",
+            "OUT",
+            companyName,
+            companyAddress,
+            quoteNumber,
+            orderNumber,
+            username,
+            godown,
+            totalD,
+            delhiD,
+            southD,
+          ]
+        );
+
+        const [summary] = await conn.execute(
+          `SELECT total_quantity, ${locationColumn} FROM stock_summary WHERE spare_id = ?`,
+          [spareId]
+        );
+        if (summary.length > 0) {
+          const prevTotal = Number(summary[0].total_quantity || 0);
+          const newTotal = Math.max(prevTotal - quantity, 0);
+          const prev = pickRowColumn(summary[0], locationColumn);
+          const newv = Math.max(prev - quantity, 0);
+          await conn.execute(
+            `UPDATE stock_summary 
+              SET last_updated_quantity = ?, total_quantity = ?, last_status = ?, updated_at = NOW(), ${locationColumn} = ?
+              WHERE spare_id = ?`,
+            [quantity, newTotal, "OUT", newv, spareId]
+          );
+        }
+      }
+    }
+
+    // Deduct spare stock for checked product accessories (by product_accessories.qty)
+    if (isProduct && accessoriesChecklist) {
+      const accessoryResult = await deductCheckedAccessoryStock(conn, {
+        accessoriesChecklistJson: accessoriesChecklist,
+        productCode: itemCode,
+        godown,
+        quoteNumber,
+        orderNumber,
+        username,
+        dispatchRowId: id,
+        companyName,
+        companyAddress,
+        partial: true,
+      });
+      if (accessoryResult.deducted.length > 0) {
+        console.log(
+          `Accessory stock deducted for dispatch #${id}:`,
+          accessoryResult.deducted,
+        );
+      }
+    }
+
+    // STEP 3: Mark stock as deducted (dispatch details already updated in STEP 1)
+    await conn.execute(
+      `UPDATE dispatch SET stock_deducted = 1, accessories_stock_deducted = ?, updated_at = NOW() WHERE id = ?`,
+      [accessoriesChecklist && isProduct ? 1 : 0, id],
+    );
+
+    // Send dispatch update email
+    try {
+      const { sendTemplatedEmail } = await import("@/lib/template-utils");
+
+      // Fetch order details
+      const [orderDetails] = await conn.execute(
+        `SELECT order_id, quote_number, client_name, email, company_name, delivery_location, 
+         booking_id, booking_url, dispatch_person 
+         FROM neworder WHERE quote_number = ? LIMIT 1`,
+        [quoteNumber]
+      );
+
+      if (orderDetails && orderDetails[0]) {
+        const order = orderDetails[0];
+
+        // Build item details HTML for this single item
+        const itemDetailsHtml = `
+          <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+            <thead>
+              <tr style="background-color: #f0f0f0;">
+                <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Item Name</th>
+                <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Item Code</th>
+                <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Serial Number</th>
+                <th style="padding: 12px; border: 1px solid #ddd; text-align: left;">Godown</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding: 12px; border: 1px solid #ddd;">${
+                  dispatchRow.item_name || "N/A"
+                }</td>
+                <td style="padding: 12px; border: 1px solid #ddd;">${
+                  itemCode || "N/A"
+                }</td>
+                <td style="padding: 12px; border: 1px solid #ddd;">${
+                  serialNo || "N/A"
+                }</td>
+                <td style="padding: 12px; border: 1px solid #ddd;">${
+                  godown || "N/A"
+                }</td>
+              </tr>
+            </tbody>
+          </table>
+        `;
+
+        // Prepare template data
+        const templateData = {
+          order_id: order.order_id,
+          quote_number: order.quote_number,
+          customer_name: order.client_name,
+          company_name: order.company_name,
+          delivery_location: order.delivery_location,
+          booking_id: order.booking_id || "N/A",
+          booking_url: order.booking_url || "#",
+          dispatch_person: order.dispatch_person || username,
+          dispatch_date: new Date().toISOString().split("T")[0],
+          item_details: itemDetailsHtml,
+          current_year: new Date().getFullYear(),
+        };
+
+        // Send email
+        const recipientEmail = order.email || "";
+        if (recipientEmail) {
+          await sendTemplatedEmail("DISPATCH", templateData, {
+            to: recipientEmail,
+            cc: "service@dynacleanindustries.com",
+          });
+        }
+      }
+    } catch (emailError) {
+      console.error("Error sending dispatch update email:", emailError);
+      // Don't fail the request if email fails
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (e) {
+    console.error("Dispatch UPDATE error:", e);
+
+    // Handle duplicate serial number error
+    if (
+      e.code === "ER_DUP_ENTRY" ||
+      (e.message && e.message.includes("Duplicate entry"))
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Duplicate entry: This serial number is already in use. Please use a unique serial number.",
+        },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json(
+      { success: false, error: e.message },
+      { status: 500 }
+    );
+  }
+}

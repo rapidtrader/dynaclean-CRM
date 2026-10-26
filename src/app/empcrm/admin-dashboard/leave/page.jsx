@@ -1,0 +1,1416 @@
+"use client";
+
+import TypeableDateFilterInput from "@/components/ui/TypeableDateFilterInput";
+import { formatCrmDateOnly } from "@/lib/crmDateFormat";
+import { useState, useEffect } from "react";
+import { 
+  Calendar, 
+  CheckCircle, 
+  XCircle, 
+  Clock, 
+  Filter,
+  Search,
+  ChevronDown,
+  User,
+  AlertCircle,
+  Sun,
+  BadgeCheck,
+  Eye,
+  FileText
+} from "lucide-react";
+
+function getLeaveAttachmentHref(leave) {
+  if (!leave?.attachment_path) return null;
+  const p = String(leave.attachment_path);
+  if (p.startsWith("http://") || p.startsWith("https://")) return p;
+  return p.startsWith("/") ? p : `/${p}`;
+}
+
+function isLeaveAttachmentImage(leave) {
+  const mime = (leave?.attachment_mime_type || "").toLowerCase();
+  if (mime.startsWith("image/")) return true;
+  const name = leave?.attachment_filename || leave?.attachment_path || "";
+  return /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(name);
+}
+import SearchableSelect from "@/components/ui/SearchableSelect";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
+export default function AdminLeaveManagement() {
+  const pathname = usePathname();
+  const leaveAdminBase = pathname?.startsWith("/director-dashboard")
+    ? "/director-dashboard/leave"
+    : "/empcrm/admin-dashboard/leave";
+
+  const [leaves, setLeaves] = useState([]);
+  const [filteredLeaves, setFilteredLeaves] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [usernameFilter, setUsernameFilter] = useState("");
+  const [fromDateFilter, setFromDateFilter] = useState("");
+  const [toDateFilter, setToDateFilter] = useState("");
+  const [selectedLeave, setSelectedLeave] = useState(null);
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [actionLoading, setActionLoading] = useState(false);
+  const [showAcknowledgeModal, setShowAcknowledgeModal] = useState(false);
+  const [acknowledgementRemark, setAcknowledgementRemark] = useState("");
+
+  // Reporting manager assignment (inside View modal)
+  const [canAddReportingManager, setCanAddReportingManager] = useState(false);
+  const [showReportingManagerModal, setShowReportingManagerModal] = useState(false);
+  const [selectedReportingManager, setSelectedReportingManager] = useState("");
+  const [reportingManagerSaving, setReportingManagerSaving] = useState(false);
+
+  // Leave policy management
+  const [employees, setEmployees] = useState([]);
+  const [selectedUser, setSelectedUser] = useState("");
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [leavePolicy, setLeavePolicy] = useState({ sick_enabled: true, paid_enabled: true, sick_allowed: 0, paid_allowed: 0 });
+  const [policyMessage, setPolicyMessage] = useState("");
+
+  // Tabs: approvals | employee
+  const [activeTab, setActiveTab] = useState("approvals");
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [userRole, setUserRole] = useState("");
+
+  useEffect(() => {
+    fetchLeaves();
+    fetchEmployees();
+    fetchUserRole();
+  }, []);
+
+  const fetchUserRole = async () => {
+    try {
+      const res = await fetch("/api/me");
+      const data = await res.json();
+      const role = data?.userRole || data?.role || "";
+      setUserRole(role);
+      setIsSuperAdmin(role === "SUPERADMIN");
+    } catch (e) {
+      console.error("Error fetching user role:", e);
+    }
+  };
+
+  // HR-only UI for setting reporting manager
+  useEffect(() => {
+    const fetchMyRole = async () => {
+      try {
+        const res = await fetch("/api/me");
+        const data = await res.json();
+        const role = data?.userRole || data?.role || "";
+        setCanAddReportingManager(["HR", "HR HEAD", "HR Executive"].includes(role));
+      } catch (e) {
+        setCanAddReportingManager(false);
+      }
+    };
+
+    fetchMyRole();
+  }, []);
+
+  useEffect(() => {
+    applyFilters();
+  }, [leaves, statusFilter, searchTerm, usernameFilter, fromDateFilter, toDateFilter, isSuperAdmin]);
+
+  const fetchLeaves = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch("/api/empcrm/leaves");
+      const data = await response.json();
+      
+      if (data.success) {
+        setLeaves(data.leaves);
+      }
+    } catch (error) {
+      console.error("Error fetching leaves:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchEmployees = async () => {
+    try {
+      const res = await fetch("/api/empcrm/employees");
+      const data = await res.json();
+      if (data?.success) setEmployees(data.employees || []);
+    } catch (e) {
+      console.error("Error fetching employees for policy:", e);
+    }
+  };
+
+  const fetchPolicy = async (username) => {
+    if (!username) return;
+    setPolicyLoading(true);
+    setPolicyMessage("");
+    try {
+      const res = await fetch(`/api/empcrm/leaves/policy?username=${encodeURIComponent(username)}`);
+      const data = await res.json();
+      if (data?.success && data?.policy) {
+        setLeavePolicy({
+          sick_enabled: !!data.policy.sick_enabled,
+          paid_enabled: !!data.policy.paid_enabled,
+          sick_allowed: Number(data.policy.sick_allowed || 0),
+          paid_allowed: Number(data.policy.paid_allowed || 0),
+        });
+      } else {
+        setPolicyMessage(data?.message || "Failed to load leave policy");
+      }
+    } catch (e) {
+      console.error("Fetch policy error:", e);
+      setPolicyMessage("Error loading leave policy");
+    } finally {
+      setPolicyLoading(false);
+    }
+  };
+
+  const savePolicy = async () => {
+    if (!selectedUser) return;
+    setPolicyLoading(true);
+    setPolicyMessage("");
+    try {
+      const res = await fetch("/api/empcrm/leaves/policy", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: selectedUser, ...leavePolicy })
+      });
+      const data = await res.json();
+      if (data?.success) setPolicyMessage("Saved successfully");
+      else setPolicyMessage(data?.message || "Failed to save");
+    } catch (e) {
+      console.error("Save policy error:", e);
+      setPolicyMessage("Error saving leave policy");
+    } finally {
+      setPolicyLoading(false);
+    }
+  };
+
+  const applyFilters = () => {
+    let filtered = [...leaves];
+
+    // Filter by created_by: If created_by != username, only SUPERADMIN can see
+    // If created_by == username or NULL, HR can see (employee submitted their own leave)
+    filtered = filtered.filter(leave => {
+      if (isSuperAdmin) {
+        // SUPERADMIN sees everything
+        return true;
+      }
+      // HR/others: only see leaves where created_by == username (self-submitted) or NULL (legacy)
+      return leave.created_by == null || leave.created_by === leave.username;
+    });
+
+    // Status filter
+    if (statusFilter !== "all") {
+      filtered = filtered.filter(leave => leave.status === statusFilter);
+    }
+
+    // Username / employee filter
+    if (usernameFilter) {
+      filtered = filtered.filter(leave => leave.username === usernameFilter);
+    }
+
+    // Search filter
+    if (searchTerm) {
+      filtered = filtered.filter(leave =>
+        leave.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        leave.username?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        leave.empId?.toString().includes(searchTerm)
+      );
+    }
+
+    // Date range: include leaves that overlap the selected period
+    if (fromDateFilter || toDateFilter) {
+      filtered = filtered.filter((leave) => {
+        const leaveStart = dateOnly(leave.from_date);
+        const leaveEnd = dateOnly(leave.to_date) || leaveStart;
+        if (!leaveStart) return false;
+        if (fromDateFilter && leaveEnd < fromDateFilter) return false;
+        if (toDateFilter && leaveStart > toDateFilter) return false;
+        return true;
+      });
+    }
+
+    setFilteredLeaves(filtered);
+  };
+
+  const handleApprove = async (leaveId) => {
+    try {
+      setActionLoading(true);
+      const response = await fetch("/api/empcrm/leaves", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leaveId, status: "approved" })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        alert("Leave approved successfully");
+        fetchLeaves();
+        setShowApprovalModal(false);
+      } else {
+        alert(data.error || "Failed to approve leave");
+      }
+    } catch (error) {
+      console.error("Error approving leave:", error);
+      alert("Error approving leave");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleAcknowledge = async (leaveId) => {
+    try {
+      setActionLoading(true);
+      const response = await fetch("/api/empcrm/leaves", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leaveId, status: "acknowledge", acknowledgement_remark: acknowledgementRemark })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        alert("Leave acknowledged successfully");
+        fetchLeaves();
+        setShowAcknowledgeModal(false);
+        setAcknowledgementRemark("");
+      } else {
+        alert(data.error || "Failed to acknowledge leave");
+      }
+    } catch (error) {
+      console.error("Error acknowledging leave:", error);
+      alert("Error acknowledging leave");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRevertAcknowledgement = async (leaveId) => {
+    try {
+      setActionLoading(true);
+      const response = await fetch("/api/empcrm/leaves", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leaveId, revert_acknowledgement: true })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        alert("Acknowledgement reverted successfully");
+        fetchLeaves();
+        setShowApprovalModal(false);
+      } else {
+        alert(data.error || "Failed to revert acknowledgement");
+      }
+    } catch (error) {
+      console.error("Error reverting acknowledgement:", error);
+      alert("Error reverting acknowledgement");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleRevert = async (leaveId) => {
+    try {
+      setActionLoading(true);
+      const response = await fetch("/api/empcrm/leaves", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leaveId, revert: true })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        alert("Leave reverted to pending successfully");
+        fetchLeaves();
+        setShowApprovalModal(false);
+      } else {
+        alert(data.error || "Failed to revert leave");
+      }
+    } catch (error) {
+      console.error("Error reverting leave:", error);
+      alert("Error reverting leave");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleReject = async (leaveId) => {
+    if (!rejectionReason.trim()) {
+      alert("Please provide a rejection reason");
+      return;
+    }
+
+    try {
+      setActionLoading(true);
+      const response = await fetch("/api/empcrm/leaves", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          leaveId, 
+          status: "rejected",
+          rejection_reason: rejectionReason 
+        })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        alert("Leave rejected successfully");
+        fetchLeaves();
+        setShowApprovalModal(false);
+        setRejectionReason("");
+      } else {
+        alert(data.error || "Failed to reject leave");
+      }
+    } catch (error) {
+      console.error("Error rejecting leave:", error);
+      alert("Error rejecting leave");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleSaveReportingManager = async () => {
+    if (!selectedLeave?.username) return;
+    if (!selectedReportingManager) {
+      alert("Please select a reporting manager");
+      return;
+    }
+
+    try {
+      setReportingManagerSaving(true);
+      const res = await fetch("/api/employees/set-reporting-manager", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          employeeUsername: selectedLeave.username,
+          reportingManagerUsername: selectedReportingManager || null,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data?.success) {
+        alert(data?.error || data?.message || "Failed to update reporting manager");
+        return;
+      }
+
+      setShowReportingManagerModal(false);
+      setSelectedReportingManager("");
+      fetchLeaves();
+    } catch (e) {
+      alert("Error updating reporting manager");
+    } finally {
+      setReportingManagerSaving(false);
+    }
+  };
+
+  const getStatusBadge = (status, acknowledgedAt) => {
+    const styles = {
+      pending: "bg-yellow-100 text-yellow-800 border-yellow-300",
+      approved: "bg-green-100 text-green-800 border-green-300",
+      rejected: "bg-red-100 text-red-800 border-red-300"
+    };
+
+    const icons = {
+      pending: <Clock className="w-3 h-3" />,
+      approved: <CheckCircle className="w-3 h-3" />,
+      rejected: <XCircle className="w-3 h-3" />
+    };
+
+    if (acknowledgedAt) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">
+          <BadgeCheck className="w-3 h-3" />
+          Acknowledged
+        </span>
+      );
+    }
+
+    return (
+      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium border ${styles[status]}`}>
+        {icons[status]}
+        {status.charAt(0).toUpperCase() + status.slice(1)}
+      </span>
+    );
+  };
+  const getLeaveTypeColor = (type) => {
+    const colors = {
+      sick: "bg-blue-100 text-blue-800",
+      paid: "bg-purple-100 text-purple-800",
+      casual: "bg-green-100 text-green-800",
+      unpaid: "bg-gray-100 text-gray-800",
+      "half-day": "bg-orange-100 text-orange-700"
+    };
+    return colors[type] || "bg-gray-100 text-gray-800";
+  };
+
+  const dateOnly = (value) => {
+    if (!value) return "";
+    const s = String(value);
+    const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return "";
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+
+  const formatDate = (dateString) => formatCrmDateOnly(dateString, "-");
+
+  const employeeFilterOptions = (() => {
+    const placeholder = { value: "", label: "All employees" };
+    const seen = new Set();
+    const opts = employees
+      .filter((emp) => emp?.username)
+      .map((emp) => {
+        if (seen.has(emp.username)) return null;
+        seen.add(emp.username);
+        return {
+          value: emp.username,
+          label: `${emp.full_name ? `${emp.full_name} — ` : ""}${emp.username}`,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.label.localeCompare(b.label));
+    return [placeholder, ...opts];
+  })();
+
+  const hasActiveFilters =
+    statusFilter !== "all" ||
+    !!searchTerm ||
+    !!usernameFilter ||
+    !!fromDateFilter ||
+    !!toDateFilter;
+
+  const pendingCount = leaves.filter(l => l.status === "pending" && !l.acknowledged_at).length;
+  const approvedCount = leaves.filter(l => l.status === "approved").length;
+  const rejectedCount = leaves.filter(l => l.status === "rejected").length;
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-3">
+          <Calendar className="w-8 h-8 text-blue-600" />
+          Leave Management
+        </h1>
+        <p className="text-gray-600 mt-2">
+          View leave applications. Only Reporting Managers can approve — use Leave Approvals in EmpCRM User Dashboard.
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <div className="mb-6 border-b">
+        <nav className="flex gap-6">
+          <button
+            onClick={() => setActiveTab("approvals")}
+            className={`pb-2 -mb-px border-b-2 text-sm font-medium ${
+              activeTab === "approvals" ? "border-blue-600 text-blue-700" : "border-transparent text-gray-600 hover:text-gray-800"
+            }`}
+          >
+            Approvals
+          </button>
+          <button
+            onClick={() => setActiveTab("employee")}
+            className={`pb-2 -mb-px border-b-2 text-sm font-medium ${
+              activeTab === "employee" ? "border-blue-600 text-blue-700" : "border-transparent text-gray-600 hover:text-gray-800"
+            }`}
+          >
+            Employee Leaves & Quota
+          </button>
+        </nav>
+      </div>
+
+      {activeTab === "approvals" && (
+      <>
+      {/* Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-yellow-600 font-medium">Pending</p>
+              <p className="text-2xl font-bold text-yellow-800">{pendingCount}</p>
+            </div>
+            <Clock className="w-10 h-10 text-yellow-400" />
+          </div>
+        </div>
+
+        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-green-600 font-medium">Approved</p>
+              <p className="text-2xl font-bold text-green-800">{approvedCount}</p>
+            </div>
+            <CheckCircle className="w-10 h-10 text-green-400" />
+          </div>
+        </div>
+
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-red-600 font-medium">Rejected</p>
+              <p className="text-2xl font-bold text-red-800">{rejectedCount}</p>
+            </div>
+            <XCircle className="w-10 h-10 text-red-400" />
+          </div>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="bg-white rounded-lg shadow-md p-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
+          <div className="lg:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Search</label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search by name, username, or empId..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Employee</label>
+            <SearchableSelect
+              options={employeeFilterOptions}
+              value={usernameFilter}
+              onChange={(val) => setUsernameFilter(val)}
+              placeholder="All employees"
+              searchPlaceholder="Search employee..."
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">From date</label>
+            <TypeableDateFilterInput value={fromDateFilter} onChange={setFromDateFilter} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"/>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">To date</label>
+            <TypeableDateFilterInput value={toDateFilter} onChange={setToDateFilter} min={fromDateFilter || undefined} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"/>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Filter className="w-4 h-4 text-gray-600" />
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            >
+              <option value="all">All Status</option>
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchTerm("");
+                setUsernameFilter("");
+                setFromDateFilter("");
+                setToDateFilter("");
+                setStatusFilter("all");
+              }}
+              className="text-sm text-blue-600 hover:text-blue-800"
+            >
+              Clear filters
+            </button>
+          )}
+          <span className="text-sm text-gray-500">
+            Showing {filteredLeaves.length} of {leaves.length} applications
+          </span>
+        </div>
+      </div>
+
+      {/* HR: Set Reporting Manager (opens employee selector page) */}
+      {canAddReportingManager && (
+        <div className="flex justify-end mb-4">
+          <Link
+            href={`${leaveAdminBase}/reporting-manager`}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+          >
+            Set Reporting Manager
+          </Link>
+        </div>
+      )}
+
+      {/* Leave Applications Table */}
+      <div className="bg-white rounded-lg shadow-md overflow-hidden">
+        {loading ? (
+          <div className="p-8 text-center text-gray-500">Loading...</div>
+        ) : filteredLeaves.length === 0 ? (
+          <div className="p-8 text-center text-gray-500">No leave applications found</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Employee
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Leave Type
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Duration
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Days
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Attachment
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Created By
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {filteredLeaves.map((leave) => (
+                  <tr key={leave.id} className="hover:bg-gray-50">
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                          <User className="w-5 h-5 text-blue-600" />
+                        </div>
+                        <div>
+                          <div className="font-medium text-gray-900">{leave.full_name || leave.username}</div>
+                          <div className="text-sm text-gray-500">EmpID: {leave.empId}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex flex-col gap-1">
+                        <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${leave.is_half_day ? "bg-orange-100 text-orange-700" : getLeaveTypeColor(leave.leave_type)}`}>
+                          {leave.is_half_day ? "Half-Day" : leave.leave_type.charAt(0).toUpperCase() + leave.leave_type.slice(1)}
+                        </span>
+                        {leave.is_half_day ? (
+                          <>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700 border border-orange-200">
+                              <Sun className="w-3 h-3" />
+                              {leave.half_day_type === "1st_half" ? "1st Half" : "2nd Half"}
+                            </span>
+                            <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${getLeaveTypeColor(leave.leave_type)}`}>
+                              {leave.leave_type.charAt(0).toUpperCase() + leave.leave_type.slice(1)}
+                            </span>
+                          </>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-900">
+                      <div>{formatDate(leave.from_date)}</div>
+                      {!leave.is_half_day && (
+                        <div className="text-gray-500">to {formatDate(leave.to_date)}</div>
+                      )}
+                      {leave.start_time && leave.end_time && (
+                        <div className="text-gray-600 mt-1 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          <span>{leave.start_time} — {leave.end_time}</span>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className="text-lg font-semibold text-gray-900">
+                        {leave.is_half_day ? "½" : leave.total_days}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex flex-col gap-2">
+                        {getStatusBadge(leave.status, leave.acknowledged_at)}
+                        {leave.acknowledged_at && leave.acknowledgement_remark && (
+                          <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-2 mt-1">
+                            <p className="text-xs font-medium text-indigo-700 mb-1">Remark:</p>
+                            <p className="text-xs text-indigo-600">{leave.acknowledgement_remark}</p>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      {getLeaveAttachmentHref(leave) ? (
+                        <div className="flex items-center gap-2">
+                          {isLeaveAttachmentImage(leave) ? (
+                            <a
+                              href={getLeaveAttachmentHref(leave)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="shrink-0 rounded border border-gray-200 overflow-hidden hover:ring-2 hover:ring-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              title="View attachment"
+                            >
+                              <img
+                                src={getLeaveAttachmentHref(leave)}
+                                alt=""
+                                className="w-12 h-12 object-cover"
+                              />
+                            </a>
+                          ) : (
+                            <div className="w-12 h-12 rounded border border-gray-200 bg-gray-50 flex items-center justify-center shrink-0">
+                              <FileText className="w-6 h-6 text-gray-500" />
+                            </div>
+                          )}
+                          <a
+                            href={getLeaveAttachmentHref(leave)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-blue-700 bg-blue-50 rounded-lg hover:bg-blue-100"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            View
+                          </a>
+                        </div>
+                      ) : (
+                        <span className="text-gray-400 text-sm">—</span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4">
+                      {leave.created_by ? (
+                        <span className="inline-block px-2 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
+                          {leave.created_by}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400 text-sm">-</span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex gap-2">
+                        {isSuperAdmin && leave.status === "pending" && !leave.acknowledged_at && (
+                          <>
+                            <button
+                              onClick={() => {
+                                setSelectedLeave(leave);
+                                setShowApprovalModal(true);
+                              }}
+                              className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
+                            >
+                              Approve
+                            </button>
+                            <button
+                              onClick={() => {
+                                setSelectedLeave(leave);
+                                setShowApprovalModal(true);
+                              }}
+                              className="px-3 py-1 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium"
+                            >
+                              Reject
+                            </button>
+                          </>
+                        )}
+                        {leave.status === "pending" && leave.acknowledged_at && (
+                          <button
+                            onClick={() => {
+                              setSelectedLeave(leave);
+                              handleRevertAcknowledgement(leave.id);
+                            }}
+                            className="px-3 py-1 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-sm font-medium"
+                          >
+                            Revert
+                          </button>
+                        )}
+                        {(leave.status === "approved" || leave.status === "rejected") && (
+                          <button
+                            onClick={() => {
+                              setSelectedLeave(leave);
+                              handleRevert(leave.id);
+                            }}
+                            className="px-3 py-1 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-sm font-medium"
+                          >
+                            Revert
+                          </button>
+                        )}
+                        {/* {leave.status === "pending" && !leave.acknowledged_at && userRole !== "HR RECRUITER" && (
+                          <button
+                            onClick={() => {
+                              setSelectedLeave(leave);
+                              setShowAcknowledgeModal(true);
+                              setAcknowledgementRemark("");
+                            }}
+                            className="px-3 py-1 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium"
+                          >
+                            Acknowledge
+                          </button>
+                        )} */}
+                        <button
+                          onClick={() => {
+                            setSelectedLeave(leave);
+                            setShowApprovalModal(true);
+                          }}
+                          className="px-3 py-1 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 text-sm font-medium"
+                        >
+                          View
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      </>
+      )}
+
+      {activeTab === "employee" && (
+      <>
+        {/* Employee Leave Policy & History */}
+        <div className="bg-white rounded-lg shadow-md p-4 mb-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-3">Employee Leave Overview</h3>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Select Employee</label>
+              <select
+                value={selectedUser}
+                onChange={(e) => { setSelectedUser(e.target.value); fetchPolicy(e.target.value); }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Choose employee...</option>
+                {employees.map(emp => (
+                  <option key={emp.empId} value={emp.username}>{emp.username}{emp.full_name ? ` - ${emp.full_name}` : ""}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Sick Allowed</label>
+              <input
+                type="number"
+                value={leavePolicy.sick_allowed}
+                onChange={(e) => setLeavePolicy({ ...leavePolicy, sick_allowed: Number(e.target.value || 0) })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
+                disabled={!selectedUser || policyLoading}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Paid Allowed</label>
+              <input
+                type="number"
+                value={leavePolicy.paid_allowed}
+                onChange={(e) => setLeavePolicy({ ...leavePolicy, paid_allowed: Number(e.target.value || 0) })}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
+                disabled={!selectedUser || policyLoading}
+              />
+            </div>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              onClick={savePolicy}
+              disabled={!selectedUser || policyLoading}
+              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              {policyLoading ? "Saving..." : "Save Policy"}
+            </button>
+            {policyMessage && <span className="text-sm text-gray-600">{policyMessage}</span>}
+          </div>
+        </div>
+
+        {/* Leave usage summary & history for selected employee */}
+        {selectedUser ? (
+          <div className="bg-white rounded-lg shadow-md p-4">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">{selectedUser} - Leave Summary & History</h3>
+            {/* Summary */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <div className="p-4 rounded-lg bg-blue-50">
+                <p className="text-sm text-blue-700">Sick Allowed</p>
+                <p className="text-2xl font-bold text-blue-900">{leavePolicy.sick_allowed}</p>
+              </div>
+              <div className="p-4 rounded-lg bg-purple-50">
+                <p className="text-sm text-purple-700">Paid Allowed</p>
+                <p className="text-2xl font-bold text-purple-900">{leavePolicy.paid_allowed}</p>
+              </div>
+              <div className="p-4 rounded-lg bg-gray-50">
+                <p className="text-sm text-gray-700">Unpaid Used</p>
+                <p className="text-2xl font-bold text-gray-900">{
+                  filteredLeaves.filter(l => l.username === selectedUser && l.status === 'approved' && l.leave_type === 'unpaid').reduce((a,b)=> a + Number(b.total_days||0), 0)
+                }</p>
+              </div>
+            </div>
+
+            {/* History Table */}
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-gray-50 border-b">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Days</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {leaves
+                    .filter(l => l.username === selectedUser)
+                    .sort((a,b)=> new Date(b.from_date) - new Date(a.from_date))
+                    .map(l => (
+                    <tr key={l.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-3 text-sm text-gray-900">
+                        <div>
+                          {l.is_half_day
+                            ? formatDate(l.from_date)
+                            : `${formatDate(l.from_date)} - ${formatDate(l.to_date)}`}
+                        </div>
+                        {l.start_time && l.end_time && (
+                          <div className="text-gray-600 mt-1 flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            <span>{l.start_time} — {l.end_time}</span>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-6 py-3 text-sm">
+                        <div className="flex flex-col gap-1">
+                          <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${getLeaveTypeColor(l.leave_type)}`}>{l.leave_type}</span>
+                          {l.is_half_day && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700 border border-orange-200">
+                              <Sun className="w-3 h-3" />
+                              {l.half_day_type === "1st_half" ? "1st Half" : "2nd Half"}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-3 text-sm text-gray-900">
+                        {l.is_half_day ? "½" : l.total_days}
+                      </td>
+                      <td className="px-6 py-3">{getStatusBadge(l.status, l.acknowledged_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg shadow-md p-6 text-gray-500">Select an employee to view summary and history.</div>
+        )}
+      </>
+      )}
+
+      {/* Approval Modal */}
+      {showApprovalModal && selectedLeave && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200">
+              <h2 className="text-2xl font-bold text-gray-800">Leave Application Details</h2>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {/* Employee Info */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-600">Employee Name</label>
+                  <p className="text-gray-900 font-medium">{selectedLeave.full_name || selectedLeave.username}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-600">Employee ID</label>
+                  <p className="text-gray-900 font-medium">{selectedLeave.empId}</p>
+                </div>
+              </div>
+
+              {/* Leave Details */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-600">Leave Type</label>
+                  <div className="flex flex-col gap-2 mt-1">
+                    <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${selectedLeave.is_half_day ? "bg-orange-100 text-orange-700" : getLeaveTypeColor(selectedLeave.leave_type)}`}>
+                      {selectedLeave.is_half_day ? "Half-Day" : selectedLeave.leave_type.charAt(0).toUpperCase() + selectedLeave.leave_type.slice(1)}
+                    </span>
+                    {selectedLeave.is_half_day && (
+                      <>
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700 border border-orange-200 w-fit">
+                          <Sun className="w-3 h-3" />
+                          Half-Day · {selectedLeave.half_day_type === "1st_half" ? "1st Half (Morning)" : "2nd Half (Afternoon)"}
+                        </span>
+                        <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${getLeaveTypeColor(selectedLeave.leave_type)} w-fit`}>
+                          {selectedLeave.leave_type === 'paid' ? '💰 Paid Leave' : selectedLeave.leave_type === 'sick' ? '🏥 Sick Leave' : selectedLeave.leave_type === 'casual' ? '📅 Casual Leave' : selectedLeave.leave_type.charAt(0).toUpperCase() + selectedLeave.leave_type.slice(1)}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-600">Total Days</label>
+                  <p className="text-gray-900 font-medium">
+                    {selectedLeave.is_half_day ? "0.5 (Half-Day)" : `${selectedLeave.total_days} days`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-600">
+                    {selectedLeave.is_half_day ? "Date" : "From Date"}
+                  </label>
+                  <p className="text-gray-900">{formatDate(selectedLeave.from_date)}</p>
+                </div>
+                {!selectedLeave.is_half_day && (
+                  <div>
+                    <label className="text-sm font-medium text-gray-600">To Date</label>
+                    <p className="text-gray-900">{formatDate(selectedLeave.to_date)}</p>
+                  </div>
+                )}
+              </div>
+
+              {selectedLeave.start_time && selectedLeave.end_time && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm font-medium text-gray-600 flex items-center gap-1">
+                      <Clock className="w-4 h-4" />
+                      Start Time
+                    </label>
+                    <p className="text-gray-900 font-medium">{selectedLeave.start_time}</p>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-gray-600 flex items-center gap-1">
+                      <Clock className="w-4 h-4" />
+                      End Time
+                    </label>
+                    <p className="text-gray-900 font-medium">{selectedLeave.end_time}</p>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="text-sm font-medium text-gray-600">Reason</label>
+                <p className="text-gray-900 mt-1 p-3 bg-gray-50 rounded-lg">{selectedLeave.reason}</p>
+              </div>
+
+              {/* Sick leave / prescription attachment */}
+              {getLeaveAttachmentHref(selectedLeave) && (
+                <div className="bg-blue-50 border border-blue-300 rounded-lg p-4">
+                  <p className="text-sm font-medium text-blue-800 mb-3">
+                    Doctor Prescription / Test Report
+                    {selectedLeave.attachment_filename && (
+                      <span className="block text-xs font-normal text-blue-600 mt-0.5 truncate">
+                        {selectedLeave.attachment_filename}
+                      </span>
+                    )}
+                  </p>
+                  {isLeaveAttachmentImage(selectedLeave) && (
+                    <a
+                      href={getLeaveAttachmentHref(selectedLeave)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mb-3 block max-w-full rounded-lg border border-blue-200 overflow-hidden hover:ring-2 hover:ring-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <img
+                        src={getLeaveAttachmentHref(selectedLeave)}
+                        alt={selectedLeave.attachment_filename || "Prescription"}
+                        className="max-h-64 w-full object-contain bg-white"
+                      />
+                    </a>
+                  )}
+                  <a
+                    href={getLeaveAttachmentHref(selectedLeave)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-3 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    <Eye className="w-4 h-4" />
+                    View
+                  </a>
+                  {selectedLeave.attachment_uploaded_at && (
+                    <p className="text-xs text-blue-600 mt-2">
+                      Uploaded: {formatDate(selectedLeave.attachment_uploaded_at)}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <label className="text-sm font-medium text-gray-600">Status</label>
+                <div className="mt-1">{getStatusBadge(selectedLeave.status, selectedLeave.acknowledged_at)}</div>
+              </div>
+
+              {selectedLeave.status === "rejected" && selectedLeave.rejection_reason && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-5 h-5 text-red-600 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-red-800">Rejection Reason</p>
+                      <p className="text-sm text-red-700 mt-1">{selectedLeave.rejection_reason}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {selectedLeave.reviewed_by && (
+                <div className="text-sm text-gray-600">
+                  Reviewed by <span className="font-medium">{selectedLeave.reviewed_by}</span> on{" "}
+                  {formatDate(selectedLeave.reviewed_at)}
+                </div>
+              )}
+
+              {selectedLeave.acknowledged_by && (
+                <div>
+                  <div className="text-sm text-indigo-600 flex items-center gap-1 mt-1">
+                    <BadgeCheck className="w-4 h-4" />
+                    Acknowledged by <span className="font-medium">{selectedLeave.acknowledged_by}</span> on{" "}
+                    {formatDate(selectedLeave.acknowledged_at)}
+                  </div>
+                  {selectedLeave.acknowledgement_remark && (
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 mt-2">
+                      <p className="text-sm font-medium text-indigo-700 mb-1">Remark:</p>
+                      <p className="text-sm text-indigo-600">{selectedLeave.acknowledgement_remark}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+            </div>
+
+            <div className="p-6 border-t border-gray-200">
+              {/* SUPERADMIN Approve/Reject Actions */}
+              {isSuperAdmin && selectedLeave.status === "pending" && !selectedLeave.acknowledged_at && (
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Rejection Reason (if rejecting)
+                  </label>
+                  <textarea
+                    value={rejectionReason}
+                    onChange={(e) => setRejectionReason(e.target.value)}
+                    placeholder="Enter reason for rejection..."
+                    rows={2}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              )}
+
+              <div className="flex justify-between items-center">
+                <div className="flex gap-2">
+                  {isSuperAdmin && selectedLeave.status === "pending" && !selectedLeave.acknowledged_at && (
+                    <>
+                      <button
+                        onClick={() => handleApprove(selectedLeave.id)}
+                        disabled={actionLoading}
+                        className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                      >
+                        {actionLoading ? "Processing..." : "Approve"}
+                      </button>
+                      <button
+                        onClick={() => handleReject(selectedLeave.id)}
+                        disabled={actionLoading}
+                        className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                      >
+                        {actionLoading ? "Processing..." : "Reject"}
+                      </button>
+                    </>
+                  )}
+                  {selectedLeave.status === "pending" && selectedLeave.acknowledged_at && (
+                    <button
+                      onClick={() => handleRevertAcknowledgement(selectedLeave.id)}
+                      disabled={actionLoading}
+                      className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50"
+                    >
+                      {actionLoading ? "Processing..." : "Revert"}
+                    </button>
+                  )}
+                  {(selectedLeave.status === "approved" || selectedLeave.status === "rejected") && (
+                    <button
+                      onClick={() => handleRevert(selectedLeave.id)}
+                      disabled={actionLoading}
+                      className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 disabled:opacity-50"
+                    >
+                      {actionLoading ? "Processing..." : "Revert"}
+                    </button>
+                  )}
+                  {/* {selectedLeave.status === "pending" && !selectedLeave.acknowledged_at && userRole !== "HR RECRUITER" && (
+                    <button
+                      onClick={() => {
+                        setShowApprovalModal(false);
+                        setShowAcknowledgeModal(true);
+                        setAcknowledgementRemark("");
+                      }}
+                      disabled={actionLoading}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {actionLoading ? "Processing..." : "Acknowledge"}
+                    </button>
+                  )} */}
+                  {canAddReportingManager && (
+                    <button
+                      onClick={() => {
+                        setSelectedReportingManager("");
+                        setShowReportingManagerModal(true);
+                      }}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                      disabled={reportingManagerSaving}
+                    >
+                      {reportingManagerSaving ? "Saving..." : "Add Reporting Manager"}
+                    </button>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    setShowApprovalModal(false);
+                    setRejectionReason("");
+                    setSelectedLeave(null);
+                    setShowReportingManagerModal(false);
+                    setSelectedReportingManager("");
+                  }}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reporting Manager Modal */}
+      {showReportingManagerModal && selectedLeave && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
+          {/* overflow-visible so SearchableSelect dropdown isn't clipped */}
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-visible">
+            <div className="p-6 border-b border-gray-200 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-gray-800">Set Reporting Manager</h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  Employee:{" "}
+                  <span className="font-medium text-gray-900">
+                    {selectedLeave.full_name || selectedLeave.username}
+                  </span>
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowReportingManagerModal(false);
+                  setSelectedReportingManager("");
+                }}
+                className="text-gray-500 hover:text-gray-700"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Reporting Manager
+                </label>
+                <SearchableSelect
+                  options={(() => {
+                    const placeholder = { value: "", label: "-- Select Reporting Manager --" };
+                    const seen = new Set();
+                    const opts = employees
+                      .filter((emp) => emp?.username && emp.username !== selectedLeave.username)
+                      .map((emp) => {
+                        const username = emp.username;
+                        if (seen.has(username)) return null;
+                        seen.add(username);
+                        return {
+                          value: username,
+                          label: `${username}${emp.userRole ? ` (${emp.userRole})` : ""}`,
+                        };
+                      })
+                      .filter(Boolean);
+
+                    return [placeholder, ...opts];
+                  })()}
+                  value={selectedReportingManager}
+                  onChange={(val) => setSelectedReportingManager(val)}
+                  placeholder="-- Select Reporting Manager --"
+                  searchPlaceholder="Search manager..."
+                />
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setShowReportingManagerModal(false);
+                    setSelectedReportingManager("");
+                  }}
+                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  disabled={reportingManagerSaving}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveReportingManager}
+                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                  disabled={reportingManagerSaving}
+                >
+                  {reportingManagerSaving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Acknowledgement Remark Modal */}
+      {showAcknowledgeModal && selectedLeave && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="p-6 border-b border-gray-200 flex items-center gap-3">
+              <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center">
+                <BadgeCheck className="w-5 h-5 text-indigo-600" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">Acknowledge Leave</h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {selectedLeave.full_name || selectedLeave.username}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Remark <span className="text-gray-500">(Optional)</span>
+                </label>
+                <textarea
+                  value={acknowledgementRemark}
+                  onChange={(e) => setAcknowledgementRemark(e.target.value)}
+                  placeholder="Enter your remark or comment about this leave..."
+                  rows={4}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                />
+                <p className="text-xs text-gray-500 mt-2">This remark will be visible to the employee.</p>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-200 flex gap-3">
+              <button
+                onClick={() => {
+                  setShowAcknowledgeModal(false);
+                  setAcknowledgementRemark("");
+                  setSelectedLeave(null);
+                }}
+                disabled={actionLoading}
+                className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleAcknowledge(selectedLeave.id)}
+                disabled={actionLoading}
+                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {actionLoading ? "Processing..." : "Acknowledge"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+

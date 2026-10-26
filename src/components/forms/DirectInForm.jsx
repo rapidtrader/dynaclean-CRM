@@ -1,0 +1,648 @@
+"use client";
+
+import TypeableDateFilterInput from "@/components/ui/TypeableDateFilterInput";
+import { useState, useEffect } from "react";
+import { toast } from "react-hot-toast";
+
+export default function DirectInForm() {
+    const [search, setSearch] = useState("");
+    const [suggestions, setSuggestions] = useState([]);
+    const [product, setProduct] = useState(null);
+    const [gstIncluded, setGstIncluded] = useState(true);
+    const [createdBy, setCreatedBy] = useState("");
+    const [formData, setFormData] = useState({
+        quantity: "",
+        price_per_unit: "",
+        amount_per_unit: "",
+        net_amount: "",
+        tax_amount: "",
+        gst_rate: "",
+        from_company: "",
+        from_address: "",
+        delivery_location: "",
+        contact: "",
+        transportation_charges: "",
+        mode_of_transport: "",
+        self_name: "",
+        courier_tracking_id: "",
+        courier_company: "",
+        porter_tracking_id: "",
+        porter_contact: "",
+        truck_number: "",
+        driver_name: "",
+        driver_number: "",
+        // Invoice fields
+        invoice_number: "",
+        invoice_date: "",
+        // Warehouse In fields
+        received_date: new Date().toISOString().split("T")[0],
+        received_quantity: "",
+        warehouse_name: "",
+        location: "",
+        remarks: "",
+    });
+    const [files, setFiles] = useState({
+        quotation_upload: null,
+        payment_proof_upload: null,
+        invoice_upload: null,
+        product_image: null,
+        eway_bill: null,
+        received_image: null,
+        supporting_doc: null,
+    });
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    useEffect(() => {
+        try {
+            const u = typeof window !== "undefined" ? localStorage.getItem("username") : "";
+            if (u) setCreatedBy(u);
+        } catch { }
+    }, []);
+
+    // Product & Spare search
+    useEffect(() => {
+        if (search.length >= 2) {
+            Promise.all([
+                fetch(`/api/products/search?q=${encodeURIComponent(search)}`)
+                    .then((res) => res.json())
+                    .catch(() => []),
+                fetch(`/api/spare/search?q=${encodeURIComponent(search)}`)
+                    .then((res) => res.json())
+                    .catch(() => []),
+            ]).then(([products, spares]) => {
+                const productItems = (Array.isArray(products) ? products : []).map((p) => ({
+                    ...p,
+                    itemType: "product",
+                    displayLabel: p.item_code,
+                }));
+                const spareItems = (Array.isArray(spares) ? spares : []).map((s) => ({
+                    ...s,
+                    itemType: "spare",
+                    item_code: String(s.id),
+                    displayLabel: s.item_name,
+                    price_per_unit: s.purchase_price || s.last_negotiation_price || s.sale_price || "",
+                    gst_rate: s.tax || "",
+                    hsn_sac: "",
+                    unit: s.type || "",
+                }));
+                setSuggestions([...productItems, ...spareItems]);
+            });
+        } else {
+            setSuggestions([]);
+        }
+    }, [search]);
+
+    const handleSelect = (selectedItem) => {
+        setProduct(selectedItem);
+        setSearch(selectedItem.itemType === "spare" ? selectedItem.item_name : selectedItem.item_code);
+        setSuggestions([]);
+        setFormData((f) => ({
+            ...f,
+            price_per_unit: selectedItem.price_per_unit || "",
+            gst_rate: selectedItem.gst_rate || selectedItem.tax || "",
+        }));
+    };
+
+    const handleChange = (e) => {
+        const { name, value } = e.target;
+        const newData = { ...formData, [name]: value };
+
+        // Auto-sync received_quantity with quantity
+        if (name === "quantity") {
+            newData.received_quantity = value;
+        }
+
+        // Calculate amounts if quantity or price changes
+        if (name === "quantity" || name === "price_per_unit" || name === "gst_rate") {
+            const quantity = name === "quantity" ? Number(value) : Number(newData.quantity);
+            const unitPrice = name === "price_per_unit" ? Number(value) : Number(newData.price_per_unit);
+            const gstRate = name === "gst_rate" ? Number(value) : Number(newData.gst_rate);
+
+            const baseAmount = quantity * unitPrice;
+            newData.amount_per_unit = unitPrice.toFixed(2);
+
+            const gstAmount = (baseAmount * gstRate) / 100;
+            newData.tax_amount = gstAmount.toFixed(2);
+
+            newData.net_amount = gstIncluded
+                ? (baseAmount + gstAmount).toFixed(2)
+                : baseAmount.toFixed(2);
+        }
+
+        setFormData(newData);
+    };
+
+    const toggleGST = () => {
+        setGstIncluded((prev) => {
+            const updated = !prev;
+            const quantity = Number(formData.quantity);
+            const unitPrice = Number(formData.price_per_unit);
+            const gstRate = Number(formData.gst_rate);
+            const baseAmount = quantity * unitPrice;
+            const gstAmount = (baseAmount * gstRate) / 100;
+
+            setFormData((f) => ({
+                ...f,
+                net_amount: updated ? (baseAmount + gstAmount).toFixed(2) : baseAmount.toFixed(2),
+            }));
+
+            return updated;
+        });
+    };
+
+    const handleFileChange = (e, fieldName) => {
+        const file = e.target.files[0];
+        if (file) {
+            if (file.size > 5 * 1024 * 1024) {
+                toast.error("File must be less than 5MB");
+                return;
+            }
+            setFiles((prev) => ({ ...prev, [fieldName]: file }));
+        }
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+
+        if (isSubmitting) return;
+
+        if (!product) {
+            toast.error("Please select a product or spare");
+            return;
+        }
+
+        if (!files.product_image) {
+            toast.error("Product image is mandatory");
+            return;
+        }
+
+        if (!files.received_image) {
+            toast.error("Received image is mandatory");
+            return;
+        }
+
+        const submitData = new FormData();
+
+        // Item details
+        submitData.append("item_type", product.itemType || "product");
+        submitData.append("product_code", product.item_code);
+        submitData.append("product_name", product.item_name);
+        submitData.append("specification", product.specification || "");
+        submitData.append("hsn", product.hsn_sac || "");
+        submitData.append("unit", product.unit || "");
+        if (product.itemType === "spare") {
+            submitData.append("spare_id", product.id);
+        }
+
+        // Form data
+        Object.keys(formData).forEach((key) => {
+            if (formData[key] !== undefined && formData[key] !== null) {
+                submitData.append(key, formData[key]);
+            }
+        });
+
+        submitData.append("gst_toggle", gstIncluded ? "Add" : "Remove");
+
+        if (createdBy) submitData.append("created_by", createdBy);
+
+        // Files
+        Object.keys(files).forEach((key) => {
+            if (files[key]) {
+                submitData.append(key, files[key]);
+            }
+        });
+
+        setIsSubmitting(true);
+
+        try {
+            const res = await fetch("/api/direct-in", {
+                method: "POST",
+                body: submitData,
+            });
+
+            if (res.ok) {
+                toast.success("Direct stock entry created successfully!");
+                // Reset form
+                setProduct(null);
+                setSearch("");
+                setFormData({
+                    quantity: "",
+                    price_per_unit: "",
+                    amount_per_unit: "",
+                    net_amount: "",
+                    tax_amount: "",
+                    gst_rate: "",
+                    from_company: "",
+                    from_address: "",
+                    delivery_location: "",
+                    contact: "",
+                    transportation_charges: "",
+                    mode_of_transport: "",
+                    self_name: "",
+                    courier_tracking_id: "",
+                    courier_company: "",
+                    porter_tracking_id: "",
+                    porter_contact: "",
+                    truck_number: "",
+                    driver_name: "",
+                    driver_number: "",
+                    invoice_number: "",
+                    invoice_date: "",
+                    received_date: new Date().toISOString().split("T")[0],
+                    received_quantity: "",
+                    warehouse_name: "",
+                    location: "",
+                    remarks: "",
+                });
+                setFiles({
+                    quotation_upload: null,
+                    payment_proof_upload: null,
+                    invoice_upload: null,
+                    product_image: null,
+                    eway_bill: null,
+                    received_image: null,
+                    supporting_doc: null,
+                });
+                document.querySelectorAll('input[type="file"]').forEach((input) => (input.value = ""));
+            } else {
+                const error = await res.json().catch(() => ({ error: "Failed to create direct entry" }));
+                toast.error(error.error || "Failed to create direct entry");
+            }
+        } catch (error) {
+            console.error("Error:", error);
+            toast.error("An error occurred");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4 bg-white border border-gray-200 rounded-lg p-6 shadow-sm mb-6">
+            <h3 className="text-lg font-semibold mb-4">Direct In - Purchase & Receive Stock</h3>
+            <p className="text-sm text-gray-600 mb-4">
+                Search and add both products and spares. Purchase record goes to product stock request; spare stock updates in stock_list and stock_summary.
+            </p>
+
+            {/* Product / Spare Search */}
+            <div>
+                <label className="block mb-1 font-medium">Search Product or Spare *</label>
+                <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="w-full border rounded p-2"
+                    placeholder="Type product code, spare name or spare number..."
+                />
+                {suggestions.length > 0 && (
+                    <ul className="border rounded mt-1 bg-white shadow max-h-48 overflow-auto">
+                        {suggestions.map((sug) => (
+                            <li
+                                key={`${sug.itemType}-${sug.itemType === "spare" ? sug.id : sug.item_code}`}
+                                onClick={() => handleSelect(sug)}
+                                className="p-2 cursor-pointer hover:bg-gray-100"
+                            >
+                                <div className="flex items-center gap-2">
+                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                        sug.itemType === "spare"
+                                            ? "bg-orange-100 text-orange-700"
+                                            : "bg-green-100 text-green-700"
+                                    }`}>
+                                        {sug.itemType === "spare" ? "Spare" : "Product"}
+                                    </span>
+                                    {sug.itemType === "spare" ? (
+                                        <>
+                                            <span className="font-bold">ID:</span> {sug.id}
+                                            <span className="mx-1">|</span>
+                                            <span className="font-bold">No:</span> {sug.spare_number}
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="font-bold">Code:</span> {sug.item_code}
+                                        </>
+                                    )}
+                                </div>
+                                <p><span className="font-bold">Name:</span> {sug.item_name}</p>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </div>
+
+            {product && (
+                <>
+                    <div className="mt-3">
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            product.itemType === "spare"
+                                ? "bg-orange-100 text-orange-700"
+                                : "bg-green-100 text-green-700"
+                        }`}>
+                            Selected: {product.itemType === "spare" ? "Spare" : "Product"}
+                        </span>
+                    </div>
+                    {/* 1. Item */}
+                    <h4 className="text-md font-semibold mt-4 mb-2">1. Item Details</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block mb-1">{product.itemType === "spare" ? "Spare ID" : "Product Code"}</label>
+                            <input value={product.item_code} disabled className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">{product.itemType === "spare" ? "Spare Name" : "Product Name"}</label>
+                            <input value={product.item_name} disabled className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Specification</label>
+                            <input value={product.specification || "N/A"} disabled className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">HSN/SAC</label>
+                            <input value={product.hsn_sac || "N/A"} disabled className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Unit</label>
+                            <input value={product.unit || "N/A"} disabled className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                    </div>
+
+                    {/* 2. Pricing */}
+                    <h4 className="text-md font-semibold mt-6 mb-2">2. Pricing</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block mb-1">GST Rate (%)</label>
+                            <input
+                                type="number"
+                                name="gst_rate"
+                                value={formData.gst_rate}
+                                onChange={handleChange}
+                                className="w-full border p-2 rounded"
+                                step="0.01"
+                            />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Quantity *</label>
+                            <input
+                                type="number"
+                                name="quantity"
+                                value={formData.quantity}
+                                onChange={handleChange}
+                                className="w-full border p-2 rounded"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Purchase Price *</label>
+                            <input
+                                type="number"
+                                name="price_per_unit"
+                                value={formData.price_per_unit}
+                                onChange={handleChange}
+                                className="w-full border p-2 rounded"
+                                step="0.01"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Amount per Unit</label>
+                            <input type="number" name="amount_per_unit" value={formData.amount_per_unit} readOnly className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="flex items-center justify-between mb-1">
+                                <span>Net Amount</span>
+                                <button type="button" onClick={toggleGST} className="text-blue-600 underline text-sm">
+                                    {gstIncluded ? "Remove GST" : "Add GST"}
+                                </button>
+                            </label>
+                            <input type="number" value={formData.net_amount} readOnly className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Tax Amount</label>
+                            <input type="number" value={formData.tax_amount} readOnly className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Transportation Charges</label>
+                            <input type="number" name="transportation_charges" value={formData.transportation_charges} onChange={handleChange} className="w-full border p-2 rounded" step="0.01" placeholder="0.00" />
+                        </div>
+                    </div>
+
+                    {/* 3. Invoice Details */}
+                    <h4 className="text-md font-semibold mt-6 mb-2">3. Invoice Details</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block mb-1">Invoice Number *</label>
+                            <input
+                                type="text"
+                                name="invoice_number"
+                                value={formData.invoice_number}
+                                onChange={handleChange}
+                                className="w-full border p-2 rounded"
+                                placeholder="Enter invoice number"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Invoice Date *</label>
+                            <TypeableDateFilterInput value={formData.invoice_date} onChange={(v) => handleChange({ target: { name: "invoice_date", value: v } })} className="w-full border p-2 rounded"
+                                required/>
+                        </div>
+                    </div>
+
+                    {/* 4. Attachments */}
+                    <h4 className="text-md font-semibold mt-6 mb-2">4. Attachments</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block mb-1">Quotation Upload</label>
+                            <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => handleFileChange(e, "quotation_upload")} className="w-full border p-2 rounded" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Payment Proof Upload</label>
+                            <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => handleFileChange(e, "payment_proof_upload")} className="w-full border p-2 rounded" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Invoice Upload</label>
+                            <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => handleFileChange(e, "invoice_upload")} className="w-full border p-2 rounded" />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Product Image *</label>
+                            <input type="file" accept=".pdf,image/*" onChange={(e) => handleFileChange(e, "product_image")} className="w-full border p-2 rounded" required />
+                        </div>
+                        <div>
+                            <label className="block mb-1">E-Way Bill</label>
+                            <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => handleFileChange(e, "eway_bill")} className="w-full border p-2 rounded" />
+                        </div>
+                    </div>
+
+                    {/* 4. Company & Delivery */}
+                    <h4 className="text-md font-semibold mt-6 mb-2">5. Company & Delivery</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block mb-1">From Company *</label>
+                            <input type="text" name="from_company" value={formData.from_company} onChange={handleChange} className="w-full border p-2 rounded" required />
+                        </div>
+                        <div>
+                            <label className="block mb-1">From Address *</label>
+                            <textarea name="from_address" value={formData.from_address} onChange={handleChange} className="w-full border p-2 rounded" rows="2" required />
+                        </div>
+                        <div>
+                            <label className="block mb-1">Contact *</label>
+                            <input type="text" name="contact" value={formData.contact} onChange={handleChange} className="w-full border p-2 rounded" placeholder="Contact person/number" required />
+                        </div>
+                        <div className="col-span-2">
+                            <label className="block mb-1">Delivery Location *</label>
+                            <textarea name="delivery_location" value={formData.delivery_location} onChange={handleChange} className="w-full border p-2 rounded" rows="2" required />
+                        </div>
+                    </div>
+
+                    {/* 5. Transport */}
+                    <h4 className="text-md font-semibold mt-6 mb-2">6. Transport</h4>
+                    <div>
+                        <label className="block mb-1">Mode of Transport *</label>
+                        <select name="mode_of_transport" value={formData.mode_of_transport} onChange={handleChange} className="w-full border p-2 rounded" required>
+                            <option value="">Select Mode</option>
+                            <option value="Self">Self</option>
+                            <option value="Courier">Courier</option>
+                            <option value="Porter">Porter</option>
+                            <option value="Truck">Truck</option>
+                        </select>
+                    </div>
+
+                    {/* Conditional Transport Fields */}
+                    {formData.mode_of_transport === "Self" && (
+                        <div className="grid grid-cols-2 gap-4 mt-4">
+                            <div>
+                                <label className="block mb-1">Name *</label>
+                                <input type="text" name="self_name" value={formData.self_name} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                        </div>
+                    )}
+
+                    {formData.mode_of_transport === "Courier" && (
+                        <div className="grid grid-cols-2 gap-4 mt-4">
+                            <div>
+                                <label className="block mb-1">Tracking ID *</label>
+                                <input type="text" name="courier_tracking_id" value={formData.courier_tracking_id} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                            <div>
+                                <label className="block mb-1">Courier Company *</label>
+                                <input type="text" name="courier_company" value={formData.courier_company} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                        </div>
+                    )}
+
+                    {formData.mode_of_transport === "Porter" && (
+                        <div className="grid grid-cols-2 gap-4 mt-4">
+                            <div>
+                                <label className="block mb-1">Tracking ID *</label>
+                                <input type="text" name="porter_tracking_id" value={formData.porter_tracking_id} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                            <div>
+                                <label className="block mb-1">Porter Contact</label>
+                                <input type="text" name="porter_contact" value={formData.porter_contact} onChange={handleChange} className="w-full border p-2 rounded" placeholder="Porter contact person/number" />
+                            </div>
+                        </div>
+                    )}
+
+                    {formData.mode_of_transport === "Truck" && (
+                        <div className="grid grid-cols-3 gap-4 mt-4">
+                            <div>
+                                <label className="block mb-1">Truck Number *</label>
+                                <input type="text" name="truck_number" value={formData.truck_number} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                            <div>
+                                <label className="block mb-1">Driver Name *</label>
+                                <input type="text" name="driver_name" value={formData.driver_name} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                            <div>
+                                <label className="block mb-1">Driver Number *</label>
+                                <input type="tel" name="driver_number" value={formData.driver_number} onChange={handleChange} className="w-full border p-2 rounded" required />
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 6. Warehouse Receipt */}
+                    <h4 className="text-md font-semibold mt-6 mb-2">7. Warehouse Receipt</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block mb-1 font-medium">Received By</label>
+                            <input value={createdBy} disabled className="w-full border p-2 rounded bg-gray-100" />
+                        </div>
+                        <div>
+                            <label className="block mb-1 font-medium">Received Date *</label>
+                            <TypeableDateFilterInput value={formData.received_date} onChange={(v) => handleChange({ target: { name: "received_date", value: v } })} max={new Date().toISOString().split("T")[0]}
+                                className="w-full border p-2 rounded"
+                                required/>
+                        </div>
+                        <div>
+                            <label className="block mb-1 font-medium">Received Quantity *</label>
+                            <input
+                                type="number"
+                                name="received_quantity"
+                                value={formData.received_quantity}
+                                onChange={handleChange}
+                                className="w-full border p-2 rounded"
+                                min="1"
+                                required
+                            />
+                            <p className="text-xs text-gray-500 mt-1">Auto-synced with order quantity</p>
+                        </div>
+                        <div>
+                            <label className="block mb-1 font-medium">Warehouse/Godown *</label>
+                            <select name="warehouse_name" value={formData.warehouse_name} onChange={handleChange} className="w-full border p-2 rounded" required>
+                                <option value="">Select Warehouse</option>
+                                <option value="Delhi - Mundka">Delhi - Mundka</option>
+                                <option value="Tamil_Nadu - Coimbatore">Tamil_Nadu - Coimbatore</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block mb-1 font-medium">Location *</label>
+                            <input
+                                type="text"
+                                name="location"
+                                value={formData.location}
+                                onChange={handleChange}
+                                className="w-full border p-2 rounded"
+                                placeholder="e.g., Gate 1 / Dock A"
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label className="block mb-1 font-medium">Received Image *</label>
+                            <input type="file" accept=".pdf,image/*" onChange={(e) => handleFileChange(e, "received_image")} className="w-full border p-2 rounded" required />
+                            <p className="text-xs text-gray-500 mt-1">Photo proof of received stock</p>
+                        </div>
+                        <div>
+                            <label className="block mb-1 font-medium">Supporting Document</label>
+                            <input type="file" accept=".pdf,image/*" onChange={(e) => handleFileChange(e, "supporting_doc")} className="w-full border p-2 rounded" />
+                            <p className="text-xs text-gray-500 mt-1">Optional: Invoice, delivery note, etc.</p>
+                        </div>
+                    </div>
+
+                    <div className="mt-4">
+                        <label className="block mb-1 font-medium">Remarks/Notes</label>
+                        <textarea
+                            name="remarks"
+                            value={formData.remarks}
+                            onChange={handleChange}
+                            className="w-full border p-2 rounded"
+                            rows="3"
+                            placeholder="Any additional notes about the stock..."
+                        />
+                    </div>
+
+                    <div className="mt-6 bg-blue-50 border border-blue-200 p-4 rounded">
+                        <p className="text-sm text-blue-800">
+                            <strong>Note:</strong> This direct entry will create both a purchase request and immediately mark it as received in the warehouse.
+                        </p>
+                    </div>
+
+                    <button
+                        type="submit"
+                        className="mt-6 bg-indigo-600 text-white px-6 py-2 rounded hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                        disabled={isSubmitting}
+                    >
+                        {isSubmitting ? "Submitting..." : "Submit Direct Entry"}
+                    </button>
+                </>
+            )}
+        </form>
+    );
+}

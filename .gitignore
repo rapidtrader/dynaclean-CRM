@@ -1,0 +1,15 @@
+node_modules/
+.next/
+.ssh/
+dist/
+build/
+*.log
+# Ignore everything under public (uploads/generated) except committed static assets.
+public/*
+!public/logo.png
+!public/attendance_import_template.csv
+.env
+
+uploads/
+uploads
+Guru.txt

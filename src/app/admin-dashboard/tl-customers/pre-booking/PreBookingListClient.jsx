@@ -1,0 +1,482 @@
+"use client";
+
+import TypeableDateFilterInput from "@/components/ui/TypeableDateFilterInput";
+import { useState, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Search,
+  Filter,
+  ChevronLeft,
+  ChevronRight,
+  MessageSquare,
+  Pencil,
+} from "lucide-react";
+import toast from "react-hot-toast";
+import dayjs from "dayjs";
+import PreBookingRemarkModal from "@/components/PreBookingRemarkModal";
+import PreBookingEditModal from "@/components/PreBookingEditModal";
+
+function getStatusStyles(status) {
+  switch (status) {
+    case "pending":
+      return "bg-yellow-100 border-yellow-400 text-yellow-800";
+    case "partial":
+      return "bg-orange-100 border-orange-400 text-orange-800";
+    case "received":
+      return "bg-green-100 border-green-400 text-green-800";
+    case "cancelled":
+      return "bg-red-100 border-red-400 text-red-800";
+    case "postponed":
+      return "bg-purple-100 border-purple-400 text-purple-800";
+    default:
+      return "bg-gray-100 border-gray-400 text-gray-800";
+  }
+}
+
+export default function PreBookingListClient({
+  preBookings,
+  total,
+  currentPage,
+  pageSize,
+  search: initialSearch,
+  modelFilter: initialModelFilter,
+  leadSourceFilter: initialLeadSourceFilter,
+  statusFilter: initialStatusFilter,
+  expectedDateFrom: initialExpectedDateFrom,
+  expectedDateTo: initialExpectedDateTo,
+  leadSources,
+}) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const [search, setSearch] = useState(initialSearch);
+  const [modelFilter, setModelFilter] = useState(initialModelFilter);
+  const [leadSourceFilter, setLeadSourceFilter] = useState(initialLeadSourceFilter);
+  const [statusFilter, setStatusFilter] = useState(initialStatusFilter);
+  const [expectedDateFrom, setExpectedDateFrom] = useState(initialExpectedDateFrom);
+  const [expectedDateTo, setExpectedDateTo] = useState(initialExpectedDateTo);
+  const [showFilters, setShowFilters] = useState(false);
+  const [updatingId, setUpdatingId] = useState(null);
+  const [remarkModal, setRemarkModal] = useState({ isOpen: false, booking: null });
+  const [editModal, setEditModal] = useState({ isOpen: false, booking: null });
+  const [bookings, setBookings] = useState(preBookings);
+
+  useEffect(() => {
+    setBookings(preBookings);
+  }, [preBookings]);
+
+  const handleEditSuccess = (updatedBooking) => {
+    if (updatedBooking?.id) {
+      setBookings((prev) =>
+        prev.map((row) =>
+          row.id === updatedBooking.id ? { ...row, ...updatedBooking } : row,
+        ),
+      );
+    }
+    router.refresh();
+  };
+
+  const totalPages = Math.ceil(total / pageSize);
+
+  const handleSearch = (e) => {
+    setSearch(e.target.value);
+  };
+
+  const applyFilters = () => {
+    const params = new URLSearchParams();
+    if (search) params.set("search", search);
+    if (modelFilter) params.set("modelFilter", modelFilter);
+    if (leadSourceFilter) params.set("leadSourceFilter", leadSourceFilter);
+    if (statusFilter) params.set("statusFilter", statusFilter);
+    if (expectedDateFrom) params.set("expectedDateFrom", expectedDateFrom);
+    if (expectedDateTo) params.set("expectedDateTo", expectedDateTo);
+    params.set("page", "1");
+
+    router.push(`/admin-dashboard/tl-customers/pre-booking?${params.toString()}`);
+  };
+
+  const clearFilters = () => {
+    setSearch("");
+    setModelFilter("");
+    setLeadSourceFilter("");
+    setStatusFilter("");
+    setExpectedDateFrom("");
+    setExpectedDateTo("");
+    router.push("/admin-dashboard/tl-customers/pre-booking");
+  };
+
+  const handlePageChange = (newPage) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("page", newPage.toString());
+    router.push(`/admin-dashboard/tl-customers/pre-booking?${params.toString()}`);
+  };
+
+  const handleStatusChange = async (bookingId, newStatus) => {
+    try {
+      setUpdatingId(bookingId);
+      const response = await fetch("/api/pre-booking", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: bookingId, status: newStatus }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        toast.success(`Status updated to ${newStatus}`);
+        // Refresh the page to show updated status
+        router.refresh();
+      } else {
+        toast.error(data.error || "Failed to update status");
+      }
+    } catch (error) {
+      console.error("Error updating status:", error);
+      toast.error("Failed to update status");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const hasActiveFilters = search || modelFilter || leadSourceFilter || statusFilter || expectedDateFrom || expectedDateTo;
+
+  return (
+    <div className="w-full">
+      <div className="mb-4">
+        <h1 className="text-3xl font-bold text-gray-800 mb-1">Pre-Bookings</h1>
+        <p className="text-gray-600">
+          Total: <span className="font-semibold text-blue-600">{total}</span> pre-bookings
+        </p>
+      </div>
+
+      {/* Search and Filter Section */}
+      <div className="bg-white rounded-lg shadow-md p-4 mb-4">
+        <div className="flex gap-4 mb-4">
+          <div className="flex-1 relative">
+            <Search className="absolute left-3 top-3 text-gray-400" size={20} />
+            <input
+              type="text"
+              placeholder="Search by Customer ID, Name, Email, Phone, or Product..."
+              value={search}
+              onChange={handleSearch}
+              onKeyPress={(e) => e.key === "Enter" && applyFilters()}
+              className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <button
+            onClick={applyFilters}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+          >
+            Search
+          </button>
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 ${
+              showFilters
+                ? "bg-blue-100 text-blue-600"
+                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+            }`}
+          >
+            <Filter size={18} />
+            Filters
+          </button>
+          {hasActiveFilters && (
+            <button
+              onClick={clearFilters}
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors font-medium"
+            >
+              Clear All
+            </button>
+          )}
+        </div>
+
+        {/* Filter Panel */}
+        {showFilters && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+            {/* Lead Source Filter */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Lead Source
+              </label>
+              <select
+                value={leadSourceFilter}
+                onChange={(e) => setLeadSourceFilter(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All Lead Sources</option>
+                {leadSources.map((source) => (
+                  <option key={source} value={source}>
+                    {source}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Status Filter */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Status
+              </label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All Status</option>
+                <option value="pending">Pending</option>
+                <option value="partial">Partial</option>
+                <option value="received">Received</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="postponed">Postponed</option>
+              </select>
+            </div>
+
+            {/* Expected Date From */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                From Date
+              </label>
+              <TypeableDateFilterInput value={expectedDateFrom} onChange={setExpectedDateFrom} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+            </div>
+
+            {/* Expected Date To */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                To Date
+              </label>
+              <TypeableDateFilterInput value={expectedDateTo} onChange={setExpectedDateTo} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+            </div>
+
+            {/* Apply Button */}
+            <div className="flex items-end">
+              <button
+                onClick={applyFilters}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Table Section */}
+      <div className="bg-white rounded-lg shadow-md overflow-hidden w-full">
+        {bookings.length === 0 ? (
+          <div className="text-center py-12 text-gray-500">
+            <p className="text-lg">No pre-bookings found</p>
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full table-auto min-w-full">
+                <thead>
+                  <tr className="bg-gray-100 border-b border-gray-200">
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Customer ID
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Customer Name
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Lead Source
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Product Name
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Item Code
+                    </th>
+                    <th className="px-3 py-3 text-center text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Qty
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Expected Date
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Status
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Order ID
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Received Date
+                    </th>
+                    <th className="px-3 py-3 text-left text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Remark
+                    </th>
+                    <th className="px-3 py-3 text-center text-sm font-semibold text-gray-700 whitespace-nowrap">
+                      Edit
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bookings.map((booking) => (
+                    <tr
+                      key={booking.id}
+                      className="border-b border-gray-200 hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="px-3 py-3 text-sm font-medium text-gray-900">
+                        {booking.customer_id}
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        <div className="font-medium">
+                          {booking.first_name} {booking.last_name}
+                        </div>
+                        <div className="text-xs text-gray-500">{booking.company}</div>
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        <span className="inline-block px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium">
+                          {booking.lead_source || "N/A"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        {booking.product_name}
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        <code className="bg-gray-100 px-2 py-1 rounded text-xs">
+                          {booking.item_code || "N/A"}
+                        </code>
+                      </td>
+                      <td className="px-3 py-3 text-sm text-center font-semibold text-gray-900">
+                        {booking.quantity}
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        {booking.expected_date
+                          ? dayjs(booking.expected_date).format("DD-MM-YYYY")
+                          : "N/A"}
+                      </td>
+                      <td className="px-3 py-3 text-sm">
+                        <span className={`inline-block px-3 py-1 rounded text-sm font-medium border-2 ${getStatusStyles(booking.status || "pending")}`}>
+                          {(booking.status || "pending").charAt(0).toUpperCase() + (booking.status || "pending").slice(1)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        {booking.order_id ? (
+                          <span className="inline-block px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium">
+                            {booking.order_id}
+                          </span>
+                        ) : (
+                          <span className="text-gray-400">-</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-3 text-sm text-gray-700">
+                        {booking.received_date
+                          ? dayjs(booking.received_date).format("DD-MM-YYYY")
+                          : "-"}
+                      </td>
+                      <td className="px-3 py-3 text-sm">
+                        {booking.remark_type ? (
+                          <div className="space-y-1">
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                                booking.remark_type === "cancelled"
+                                  ? "bg-red-100 text-red-800"
+                                  : "bg-purple-100 text-purple-800"
+                              }`}
+                            >
+                              {booking.remark_type === "cancelled"
+                                ? "Order Cancelled"
+                                : "Order Postponed"}
+                            </span>
+                            <p
+                              className="text-xs text-gray-600 break-words"
+                              title={booking.remark_reason}
+                            >
+                              {booking.remark_reason}
+                            </p>
+                            {booking.remark_type === "postponed" && booking.postponed_date && (
+                              <p className="text-xs text-gray-500">
+                                New date: {dayjs(booking.postponed_date).format("DD-MM-YYYY")}
+                              </p>
+                            )}
+                            <button
+                              onClick={() =>
+                                setRemarkModal({ isOpen: true, booking })
+                              }
+                              className="text-xs text-blue-600 hover:underline"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() =>
+                              setRemarkModal({ isOpen: true, booking })
+                            }
+                            disabled={
+                              booking.status === "received" ||
+                              booking.status === "partial"
+                            }
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                          >
+                            <MessageSquare size={14} />
+                            Add Remark
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-3 py-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditModal({ isOpen: true, booking })
+                          }
+                          className="inline-flex items-center justify-center p-2 text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
+                          title="Edit pre-booking"
+                        >
+                          <Pencil size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-t border-gray-200">
+                <div className="text-sm text-gray-600">
+                  Page <span className="font-semibold">{currentPage}</span> of{" "}
+                  <span className="font-semibold">{totalPages}</span> (
+                  <span className="font-semibold">{total}</span> total)
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => handlePageChange(currentPage - 1)}
+                    disabled={currentPage === 1}
+                    className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeft size={18} />
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => handlePageChange(currentPage + 1)}
+                    disabled={currentPage === totalPages}
+                    className="flex items-center gap-1 px-3 py-2 border border-gray-300 rounded-lg hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    Next
+                    <ChevronRight size={18} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <PreBookingRemarkModal
+        isOpen={remarkModal.isOpen}
+        booking={remarkModal.booking}
+        onClose={() => setRemarkModal({ isOpen: false, booking: null })}
+        onSuccess={() => router.refresh()}
+      />
+
+      <PreBookingEditModal
+        isOpen={editModal.isOpen}
+        booking={editModal.booking}
+        onClose={() => setEditModal({ isOpen: false, booking: null })}
+        onSuccess={handleEditSuccess}
+      />
+    </div>
+  );
+}

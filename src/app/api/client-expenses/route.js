@@ -1,0 +1,204 @@
+import { NextResponse } from "next/server";
+import { getDbConnection } from "@/lib/db";
+import { jwtVerify } from "jose";
+
+export async function GET(req) {
+  try {
+    const token = req.cookies.get("token")?.value;
+    if (!token) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    await jwtVerify(token, new TextEncoder().encode(process.env.JWT_SECRET));
+
+    const { searchParams } = new URL(req.url);
+    const rootOnly = searchParams.get("root_only") === "1";
+
+    const conn = await getDbConnection();
+    try {
+      await conn.execute("SELECT transaction_id FROM client_expenses LIMIT 1");
+    } catch (_) {
+      try {
+        await conn.execute("ALTER TABLE client_expenses ADD COLUMN transaction_id VARCHAR(255) NULL AFTER hsn");
+      } catch (__) {}
+    }
+
+    const selectCols = `ce.id, ce.expense_name, ce.client_name, ce.group_name, ce.tax_applicable, ce.tax_type, ce.main_head, ce.head, ce.supply, ce.type_of_ledger, ce.cgst, ce.sgst, ce.igst, ce.hsn, ce.transaction_id, ce.gst_rate, ce.amount, ce.created_at`;
+
+    const subHeadJoin = `
+           LEFT JOIN (
+             SELECT client_expense_id, GROUP_CONCAT(sub_head ORDER BY id SEPARATOR ', ') AS sub_heads_joined
+             FROM client_expense_sub_heads
+             GROUP BY client_expense_id
+           ) sh ON sh.client_expense_id = ce.id`;
+
+    const [rows] = rootOnly
+      ? await conn.execute(
+          `SELECT ${selectCols}, COALESCE(sh.sub_heads_joined, '') AS sub_heads_joined
+           FROM client_expenses ce
+           INNER JOIN (
+             SELECT MIN(id) AS id
+             FROM client_expenses
+             GROUP BY client_name, COALESCE(group_name, '')
+           ) r ON ce.id = r.id
+           LEFT JOIN (
+             SELECT ce_inner.client_name, ce_inner.group_name, GROUP_CONCAT(DISTINCT cesh_inner.sub_head ORDER BY cesh_inner.sub_head SEPARATOR ', ') AS sub_heads_joined
+             FROM client_expenses ce_inner
+             JOIN client_expense_sub_heads cesh_inner ON ce_inner.id = cesh_inner.client_expense_id
+             GROUP BY ce_inner.client_name, ce_inner.group_name
+           ) sh ON ce.client_name = sh.client_name AND COALESCE(ce.group_name, '') = COALESCE(sh.group_name, '')
+           ORDER BY ce.id DESC`,
+        )
+      : await conn.execute(
+          `SELECT ce.id, ce.expense_name, ce.client_name, ce.group_name, ce.tax_applicable, ce.tax_type, ce.main_head, ce.head, ce.supply, ce.type_of_ledger, ce.cgst, ce.sgst, ce.igst, ce.hsn, ce.transaction_id, ce.gst_rate, ce.amount, ce.created_at,
+                  COALESCE(sh.sub_heads_joined, '') AS sub_heads_joined
+           FROM client_expenses ce
+           ${subHeadJoin}
+           ORDER BY ce.id DESC`,
+        );
+
+    let finalRows = rows;
+    if (rootOnly) {
+      // Also fetch approved employee expenses to show in statement picker
+      const [empRows] = await conn.execute(`
+        SELECT 
+          ID as id, 
+          CONCAT('EMP: ', description) as expense_name, 
+          username as client_name, 
+          'Employee Expense' as group_name,
+          'employee' as expense_type,
+          TicketCost + HotelCost + MealsCost + OtherExpenses as amount,
+          timestamp as created_at
+        FROM expenses 
+        WHERE approval_status = 'Approved'
+        ORDER BY ID DESC
+      `);
+      // Add expense_type 'client' to client expenses
+      const clientWithTypes = rows.map(r => ({ ...r, expense_type: 'client' }));
+      finalRows = [...clientWithTypes, ...empRows];
+    }
+
+    return NextResponse.json({ clientExpenses: finalRows });
+  } catch (err) {
+    console.error("[client-expenses-api] GET error:", err?.message || err);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
+  }
+}
+
+export async function POST(req) {
+  try {
+    const token = req.cookies.get("token")?.value;
+    if (!token) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    await jwtVerify(token, new TextEncoder().encode(process.env.JWT_SECRET));
+
+    const data = await req.json();
+    const {
+      expense_name,
+      client_name,
+      group_name,
+      tax_applicable,
+      tax_type,
+      main_head,
+      head,
+      supply,
+      sub_heads,
+      type_of_ledger,
+      cgst,
+      sgst,
+      igst,
+      hsn,
+      transaction_id,
+      gst_rate,
+      amount,
+    } = data;
+
+    const txnId =
+      transaction_id != null && String(transaction_id).trim() !== "" ? String(transaction_id).trim() : null;
+
+    if (!expense_name || !client_name || !main_head) {
+      return NextResponse.json(
+        { error: "expense_name, client_name, and main_head are required" },
+        { status: 400 }
+      );
+    }
+
+    if (!["Direct", "Indirect"].includes(main_head)) {
+      return NextResponse.json(
+        { error: "main_head must be Direct or Indirect" },
+        { status: 400 }
+      );
+    }
+
+    const conn = await getDbConnection();
+    try {
+      await conn.execute("SELECT tax_applicable, tax_type FROM client_expenses LIMIT 1");
+    } catch (_) {
+      try {
+        await conn.execute("ALTER TABLE client_expenses ADD COLUMN tax_applicable TINYINT(1) NOT NULL DEFAULT 0 AFTER group_name");
+      } catch (__) {}
+      try {
+        await conn.execute("ALTER TABLE client_expenses ADD COLUMN tax_type VARCHAR(50) NULL AFTER tax_applicable");
+      } catch (__) {}
+    }
+    try {
+      await conn.execute("SELECT transaction_id FROM client_expenses LIMIT 1");
+    } catch (_) {
+      try {
+        await conn.execute("ALTER TABLE client_expenses ADD COLUMN transaction_id VARCHAR(255) NULL AFTER hsn");
+      } catch (__) {}
+    }
+    try {
+      await conn.execute("SELECT sub_heads FROM client_expenses LIMIT 1");
+    } catch (_) {
+      try {
+        await conn.execute("ALTER TABLE client_expenses ADD COLUMN sub_heads TEXT NULL AFTER amount");
+      } catch (__) {}
+    }
+    const subHeadsList = Array.isArray(sub_heads)
+      ? sub_heads.map((s) => String(s || "").trim()).filter(Boolean)
+      : [];
+    const subHeadsString = subHeadsList.length > 0 ? subHeadsList.join(", ") : null;
+    const validSupply = ["goods", "services"].includes(supply) ? supply : null;
+    const [insertResult] = await conn.execute(
+      `INSERT INTO client_expenses (expense_name, client_name, group_name, tax_applicable, tax_type, main_head, head, supply, type_of_ledger, cgst, sgst, igst, hsn, transaction_id, gst_rate, amount, sub_heads)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        expense_name,
+        client_name,
+        group_name || null,
+        tax_applicable ? 1 : 0,
+        tax_applicable && tax_type ? tax_type : null,
+        main_head,
+        head || null,
+        validSupply,
+        type_of_ledger || null,
+        cgst != null && cgst !== "" ? Number(cgst) : null,
+        sgst != null && sgst !== "" ? Number(sgst) : null,
+        igst != null && igst !== "" ? Number(igst) : null,
+        hsn || null,
+        txnId,
+        gst_rate != null && gst_rate !== "" ? Number(gst_rate) : null,
+        amount != null && amount !== "" ? Number(amount) : null,
+        subHeadsString,
+      ]
+    );
+
+    const clientExpenseId = insertResult.insertId;
+    for (const sh of subHeadsList) {
+      if (sh && typeof sh === "string" && sh.trim()) {
+        await conn.execute(
+          `INSERT INTO client_expense_sub_heads (client_expense_id, sub_head) VALUES (?, ?)`,
+          [clientExpenseId, sh.trim()]
+        );
+      }
+    }
+
+    return NextResponse.json({ success: true });
+  } catch (err) {
+    console.error("[client-expenses-api] POST error:", err?.message || err);
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
+  }
+}

@@ -1,0 +1,647 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  Search,
+  Trash2,
+  CheckSquare,
+  Square,
+  BadgeCheck,
+  Download,
+  FileSpreadsheet,
+} from "lucide-react";
+import ExcelJS from "exceljs";
+import toast from "react-hot-toast";
+import {
+  generatePayslipPDF,
+  downloadPayslip,
+  downloadPdfUint8,
+  generateMergedPayslipsPdfBytes,
+  buildTemplatePayslipHTML,
+  buildPayslipOptsFromMonthlyRecord,
+} from "@/utils/payslipGenerator";
+import {
+  PayslipRecordsShell,
+  PayslipRefreshButton,
+  PayslipStatusCell,
+  PayslipDownloadButton,
+  PayslipViewButton,
+  PayslipPreviewModal,
+  PAYSLIP_UI,
+  formatPayslipCurrency,
+  formatPayslipMonth,
+  payslipThClass,
+  payslipThRightClass,
+  payslipTdClass,
+  payslipTdRightClass,
+  payslipInputClass,
+  payslipSecondaryButtonClass,
+} from "@/components/empcrm/PayslipRecordsListUI";
+
+export default function AdminSalarySlipsPage() {
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [month, setMonth] = useState("");
+  const [search, setSearch] = useState("");
+  const [searchDraft, setSearchDraft] = useState("");
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState("");
+  const [previewTitle, setPreviewTitle] = useState("");
+  const [userRole, setUserRole] = useState(null);
+
+  // Bulk select state
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const [approving, setApproving] = useState(false);
+  // Per-row approve loading
+  const [approvingId, setApprovingId] = useState(null);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+
+  const canDelete = userRole === "SUPERADMIN" || userRole === "DIRECTOR" || userRole === "ADMIN";
+  const canApprove = userRole === "SUPERADMIN" || userRole === "DIRECTOR" || userRole === "ADMIN";
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setSelectedIds(new Set());
+    try {
+      const q = new URLSearchParams();
+      if (month) q.set("month", month);
+      if (search.trim()) q.set("search", search.trim());
+      const res = await fetch(`/api/empcrm/salary/all-records?${q.toString()}`);
+      const data = await res.json();
+      if (res.status === 403) {
+        toast.error(data.message || "Not allowed");
+        setRecords([]);
+        return;
+      }
+      if (data.success) {
+        setRecords(data.salaryRecords || []);
+      } else {
+        toast.error(data.message || "Failed to load");
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error("Failed to load salary slips");
+    } finally {
+      setLoading(false);
+    }
+  }, [month, search]);
+
+  useEffect(() => {
+    load();
+    fetch("/api/me")
+      .then((r) => r.json())
+      .then((d) => setUserRole(d?.userRole ?? d?.user?.userRole ?? d?.role ?? null))
+      .catch(() => {});
+  }, [load]);
+
+  const applySearch = () => {
+    setSearch(searchDraft);
+  };
+
+  // Bulk select helpers
+  const allSelected = records.length > 0 && selectedIds.size === records.length;
+  const someSelected = selectedIds.size > 0 && !allSelected;
+
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(records.map((r) => r.id)));
+    }
+  };
+
+  const toggleOne = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    if (
+      !confirm(
+        `Delete ${selectedIds.size} selected salary slip${selectedIds.size > 1 ? "s" : ""}? This cannot be undone.`
+      )
+    )
+      return;
+
+    setDeleting(true);
+    const toastId = toast.loading(`Deleting ${selectedIds.size} record${selectedIds.size > 1 ? "s" : ""}…`);
+    try {
+      const res = await fetch("/api/empcrm/salary/all-records", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: Array.from(selectedIds) }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(`Deleted ${data.deleted} record${data.deleted !== 1 ? "s" : ""}`, { id: toastId });
+        load();
+      } else {
+        toast.error(data.message || "Delete failed", { id: toastId });
+      }
+    } catch {
+      toast.error("Error deleting records", { id: toastId });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // Approve a single record
+  const handleApproveOne = async (id) => {
+    setApprovingId(id);
+    const toastId = toast.loading("Approving…");
+    try {
+      const res = await fetch("/api/empcrm/salary/all-records", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [id], status: "approved" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success("Salary slip approved", { id: toastId });
+        load();
+      } else {
+        toast.error(data.message || "Approval failed", { id: toastId });
+      }
+    } catch {
+      toast.error("Error approving record", { id: toastId });
+    } finally {
+      setApprovingId(null);
+    }
+  };
+
+  // Bulk approve selected records
+  const handleBulkApprove = async () => {
+    if (selectedIds.size === 0) return;
+    // Only approve those that are draft / pending
+    const draftIds = records
+      .filter((r) => selectedIds.has(r.id) && ["draft", "pending"].includes((r.status || "").toLowerCase()))
+      .map((r) => r.id);
+
+    if (draftIds.length === 0) {
+      toast.error("No draft/pending records selected to approve.");
+      return;
+    }
+
+    if (!confirm(`Approve ${draftIds.length} salary slip${draftIds.length > 1 ? "s" : ""}?`)) return;
+
+    setApproving(true);
+    const toastId = toast.loading(`Approving ${draftIds.length} record${draftIds.length > 1 ? "s" : ""}…`);
+    try {
+      const res = await fetch("/api/empcrm/salary/all-records", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: draftIds, status: "approved" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(`Approved ${data.updated} record${data.updated !== 1 ? "s" : ""}`, { id: toastId });
+        setSelectedIds(new Set());
+        load();
+      } else {
+        toast.error(data.message || "Approval failed", { id: toastId });
+      }
+    } catch {
+      toast.error("Error approving records", { id: toastId });
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const handleDownload = async (record) => {
+    const toastId = toast.loading("Generating payslip…");
+    try {
+      const pdf = await generatePayslipPDF(record, record);
+      const u = record.username || record.full_name || "employee";
+      downloadPayslip(pdf, `Payslip_${u}_${record.salary_month}.pdf`);
+      toast.success("Downloaded", { id: toastId });
+    } catch (e) {
+      console.error(e);
+      toast.error("Could not generate payslip", { id: toastId });
+    }
+  };
+
+  const handleView = (record) => {
+    const opts = buildPayslipOptsFromMonthlyRecord(record);
+    setPreviewHtml(buildTemplatePayslipHTML(opts));
+    const u = record.username || record.full_name || "Employee";
+    setPreviewTitle(`Payslip — ${u} — ${formatPayslipMonth(record.salary_month)}`);
+    setPreviewOpen(true);
+  };
+
+  const formatDeductionDetailsText = (record) => {
+    const d = record?.deduction_details;
+    if (!Array.isArray(d) || d.length === 0) return "";
+    return d
+      .map((x) => {
+        const name = (x.deduction_name || x.deduction_code || "").trim();
+        const amt = Number(x.amount);
+        if (!name && !Number.isFinite(amt)) return "";
+        return `${name || "?"}: ${Number.isFinite(amt) ? amt : x.amount}`;
+      })
+      .filter(Boolean)
+      .join("; ");
+  };
+
+  const formatDoj = (raw) => {
+    if (raw == null || raw === "") return "";
+    const d = raw instanceof Date ? raw : new Date(raw);
+    if (Number.isNaN(d.getTime())) return String(raw);
+    return d.toLocaleDateString("en-IN");
+  };
+
+  const handleExportExcel = async () => {
+    if (records.length === 0) {
+      toast.error("No rows to export.");
+      return;
+    }
+    setExportingExcel(true);
+    const toastId = toast.loading("Building Excel…");
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("Salary slips", {
+        views: [{ state: "frozen", ySplit: 1 }],
+      });
+
+      const headers = [
+        "Username",
+        "Employee name",
+        "Emp ID",
+        "Email",
+        "Designation",
+        "Department",
+        "Salary month",
+        "Month (label)",
+        "Status",
+        "Date of joining",
+        "Bank name",
+        "Bank account",
+        "PAN",
+        "Working days",
+        "Present days",
+        "Overtime hours",
+        "Basic salary",
+        "HRA",
+        "Transport allowance",
+        "Medical allowance",
+        "Special allowance",
+        "Bonus",
+        "Overtime amount",
+        "Total earnings",
+        "PF",
+        "ESI",
+        "Income tax (TDS)",
+        "Professional tax",
+        "Other deductions",
+        "Total deductions",
+        "Gross salary",
+        "Net salary",
+        "Deduction details (line items)",
+      ];
+
+      sheet.addRow(headers);
+      const headerRow = sheet.getRow(1);
+      headerRow.font = { bold: true };
+      headerRow.alignment = { vertical: "middle", wrapText: true };
+
+      for (const row of records) {
+        const num = (v) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        sheet.addRow([
+          row.username ?? "",
+          row.full_name ?? "",
+          row.empId ?? "",
+          row.email ?? "",
+          row.userRole || row.userDepartment || row.department || "",
+          row.department || row.userDepartment || "",
+          row.salary_month ?? "",
+          formatPayslipMonth(row.salary_month),
+          row.status ?? "",
+          formatDoj(row.date_of_joining),
+          row.bank_name ?? "",
+          row.bank_account_number ?? "",
+          row.pan_number ?? "",
+          row.working_days ?? "",
+          row.present_days ?? "",
+          num(row.overtime_hours),
+          num(row.basic_salary),
+          num(row.hra),
+          num(row.transport_allowance),
+          num(row.medical_allowance),
+          num(row.special_allowance),
+          num(row.bonus),
+          num(row.overtime_amount),
+          num(row.total_earnings),
+          num(row.pf_deduction),
+          num(row.esi_deduction),
+          num(row.income_tax),
+          num(row.professional_tax),
+          num(row.other_deductions),
+          num(row.total_deductions),
+          num(row.gross_salary),
+          num(row.net_salary),
+          formatDeductionDetailsText(row),
+        ]);
+      }
+
+      sheet.columns = headers.map((h, i) => {
+        const w =
+          i === headers.length - 1
+            ? 42
+            : [5, 6, 7, 8, 9, 10, 11, 12, 13].includes(i)
+              ? 14
+              : 12;
+        return { width: w };
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement("a");
+        a.href = url;
+        const m = month || "all_months";
+        a.download = `Salary_slips_${m}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        a.click();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      toast.success(`Exported ${records.length} row${records.length === 1 ? "" : "s"}`, { id: toastId });
+    } catch (e) {
+      console.error(e);
+      toast.error("Could not export Excel", { id: toastId });
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleDownloadAll = async () => {
+    if (records.length === 0) return;
+    setDownloadingAll(true);
+    const n = records.length;
+    const toastId = toast.loading(
+      n === 1 ? "Generating payslip…" : `Generating payslips (0 / ${n})…`,
+    );
+    try {
+      const bytes = await generateMergedPayslipsPdfBytes(records, {
+        onProgress: (done, total) => {
+          if (total > 1) {
+            toast.loading(`Generating payslips (${done} / ${total})…`, { id: toastId });
+          }
+        },
+      });
+      const monthLabel = month || "all_months";
+      downloadPdfUint8(
+        bytes,
+        `Salary_slips_${monthLabel}_${new Date().toISOString().slice(0, 10)}.pdf`,
+      );
+      toast.success(n === 1 ? "Downloaded" : `Downloaded ${n} payslips in one PDF`, { id: toastId });
+    } catch (e) {
+      console.error(e);
+      toast.error("Could not build combined PDF", { id: toastId });
+    } finally {
+      setDownloadingAll(false);
+    }
+  };
+
+  const toolbar = (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4">
+        <div className="flex flex-col sm:flex-row flex-wrap gap-4 flex-1">
+          <label className="flex flex-col gap-1 min-w-[11rem] text-xs font-semibold text-gray-800 uppercase tracking-wide">
+            Salary month
+            <input
+              type="month"
+              value={month}
+              onChange={(e) => setMonth(e.target.value)}
+              className={payslipInputClass}
+            />
+          </label>
+          <label className="flex flex-col gap-1 flex-1 min-w-[12rem] text-xs font-semibold text-gray-800 uppercase tracking-wide">
+            Search
+            <div className="flex gap-2">
+              <input
+                type="search"
+                value={searchDraft}
+                onChange={(e) => setSearchDraft(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && applySearch()}
+                placeholder="Username, emp ID, email…"
+                className={payslipInputClass}
+              />
+              <button
+                type="button"
+                onClick={applySearch}
+                className={`shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-sm text-sm font-semibold text-white border border-black ${PAYSLIP_UI.navy} ${PAYSLIP_UI.navyHover}`}
+              >
+                <Search className="w-4 h-4" />
+                Apply
+              </button>
+            </div>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-end gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleExportExcel}
+            disabled={loading || records.length === 0 || exportingExcel}
+            title="Download current table as Excel (same payroll fields as payslip)"
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-sm text-sm font-semibold text-white border border-black disabled:opacity-50 disabled:pointer-events-none bg-emerald-800 hover:bg-emerald-900`}
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            {exportingExcel ? "Exporting…" : "Excel"}
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadAll}
+            disabled={loading || records.length === 0 || downloadingAll}
+            title="Merge all salary slips currently visible in the table into one PDF"
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-sm text-sm font-semibold text-white border border-black disabled:opacity-50 disabled:pointer-events-none ${PAYSLIP_UI.navy} ${PAYSLIP_UI.navyHover}`}
+          >
+            <Download className="w-4 h-4" />
+            {downloadingAll ? "Preparing…" : "Download all"}
+          </button>
+          <PayslipRefreshButton onClick={load} loading={loading} />
+        </div>
+      </div>
+
+      {/* Bulk action bar — visible when rows are selected */}
+      {selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg">
+          <span className="text-sm font-medium text-slate-700">
+            {selectedIds.size} record{selectedIds.size > 1 ? "s" : ""} selected
+          </span>
+
+          {/* Approve button — HR roles */}
+          {canApprove && (
+            <button
+              type="button"
+              onClick={handleBulkApprove}
+              disabled={approving || deleting}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-green-600 text-white rounded-md text-sm font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors"
+            >
+              <BadgeCheck className="w-4 h-4" />
+              {approving ? "Approving…" : "Approve Selected"}
+            </button>
+          )}
+
+          {/* Delete button — SUPERADMIN only */}
+          {canDelete && (
+            <button
+              type="button"
+              onClick={handleBulkDelete}
+              disabled={deleting || approving}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-red-600 text-white rounded-md text-sm font-semibold hover:bg-red-700 disabled:opacity-50 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              {deleting ? "Deleting…" : "Delete Selected"}
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setSelectedIds(new Set())}
+            className="text-sm text-slate-500 hover:text-slate-800 underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
+      {(month || search) && (
+        <button
+          type="button"
+          onClick={() => {
+            setMonth("");
+            setSearch("");
+            setSearchDraft("");
+          }}
+          className={payslipSecondaryButtonClass + " self-start"}
+        >
+          Clear filters
+        </button>
+      )}
+    </div>
+  );
+
+  return (
+    <>
+    <PayslipRecordsShell
+      title="Salary slips"
+      subtitle="All employees’ monthly records. Filter by month or search by user, employee ID, or email."
+      listTitle="Pay slip records"
+      toolbar={toolbar}
+      listHint={
+        !loading && records.length > 0
+          ? "Showing up to 200 rows per request. Narrow month or search to find a specific slip."
+          : undefined
+      }
+      loading={loading}
+      empty={!loading && records.length === 0}
+      emptyMessage="No records match your filters."
+    >
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr className={PAYSLIP_UI.navy}>
+            {/* Select-all checkbox — HR + SUPERADMIN */}
+            {(canApprove || canDelete) && (
+              <th className="px-3 py-3 w-10">
+                <button
+                  type="button"
+                  onClick={toggleAll}
+                  className="flex items-center justify-center text-white hover:text-gray-200"
+                  title={allSelected ? "Deselect all" : "Select all"}
+                >
+                  {allSelected ? (
+                    <CheckSquare className="w-4 h-4" />
+                  ) : someSelected ? (
+                    <CheckSquare className="w-4 h-4 opacity-60" />
+                  ) : (
+                    <Square className="w-4 h-4" />
+                  )}
+                </button>
+              </th>
+            )}
+            <th className={payslipThClass}>Employee</th>
+            <th className={payslipThClass}>Emp ID</th>
+            <th className={payslipThClass}>Month</th>
+            <th className={payslipThClass}>Status</th>
+            <th className={payslipThRightClass}>Net salary</th>
+            <th className={payslipThRightClass}>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((row) => {
+            const isSelected = selectedIds.has(row.id);
+            return (
+              <tr
+                key={row.id}
+                className={`hover:bg-slate-50/90 ${isSelected ? "bg-red-50" : "bg-white"}`}
+              >
+                {/* Row checkbox — HR + SUPERADMIN */}
+                {(canApprove || canDelete) && (
+                  <td className="px-3 py-3 w-10">
+                    <button
+                      type="button"
+                      onClick={() => toggleOne(row.id)}
+                      className={`flex items-center justify-center ${isSelected ? "text-green-600" : "text-gray-400 hover:text-gray-600"}`}
+                    >
+                      {isSelected ? (
+                        <CheckSquare className="w-4 h-4" />
+                      ) : (
+                        <Square className="w-4 h-4" />
+                      )}
+                    </button>
+                  </td>
+                )}
+                <td className={`${payslipTdClass} font-medium`}>
+                  {row.username || row.full_name}
+                </td>
+                <td className={`${payslipTdClass} tabular-nums text-gray-700`}>{row.empId ?? "—"}</td>
+                <td className={payslipTdClass}>{formatPayslipMonth(row.salary_month)}</td>
+                <td className={payslipTdClass}>
+                  <PayslipStatusCell status={row.status} />
+                </td>
+                <td className={payslipTdRightClass}>{formatPayslipCurrency(row.net_salary)}</td>
+                <td className={`${payslipTdRightClass} align-middle`}>
+                  <div className="flex justify-end flex-wrap gap-2">
+                    {/* Approve button — only for draft/pending slips */}
+                    {canApprove && ["draft", "pending"].includes((row.status || "").toLowerCase()) && (
+                      <button
+                        type="button"
+                        onClick={() => handleApproveOne(row.id)}
+                        disabled={approvingId === row.id}
+                        title="Approve this salary slip"
+                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white text-xs font-semibold rounded-md hover:bg-green-700 disabled:opacity-50 transition-colors"
+                      >
+                        <BadgeCheck className="w-3.5 h-3.5" />
+                        {approvingId === row.id ? "…" : "Approve"}
+                      </button>
+                    )}
+                    <PayslipViewButton onClick={() => handleView(row)} />
+                    <PayslipDownloadButton onClick={() => handleDownload(row)} />
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </PayslipRecordsShell>
+    <PayslipPreviewModal
+      open={previewOpen}
+      title={previewTitle}
+      html={previewHtml}
+      onClose={() => setPreviewOpen(false)}
+    />
+    </>
+  );
+}

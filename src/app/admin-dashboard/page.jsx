@@ -1,0 +1,727 @@
+// // app/admin-dashboard/page.jsx
+// import { cookies } from "next/headers";
+// import { jwtVerify } from "jose";
+// import { getDbConnection } from "@/lib/db";
+// import UpcomingTasks from "@/components/task/UpcomingTasksAdmin";
+// // import UpcomingLeads from "@/components/Leads/UpcommingLeads";
+
+// const JWT_SECRET = process.env.JWT_SECRET || "your-secret";
+
+// export default async function UserDashboardPage() {
+//   const cookieStore = await cookies();
+//   const token = cookieStore.get("token")?.value;
+
+//   if (!token) {
+//     return <p className="text-red-600">Unauthorized</p>;
+//   }
+
+//   try {
+//     const { payload } = await jwtVerify(
+//       token,
+//       new TextEncoder().encode(JWT_SECRET)
+//     );
+
+//     const username = payload.username;
+
+//     const connection = await getDbConnection();
+
+//     const [rows] = await connection.execute(
+//       `
+//       SELECT username, email, empId, userRole FROM emplist WHERE username = ?
+//       UNION
+//       SELECT username, email, empId, userRole FROM rep_list WHERE username = ?
+//       `,
+//       [username, username]
+//     );
+//     const user = rows[0];
+
+//     const [pendingOrders] = await connection.execute(
+//       `
+//       SELECT * FROM neworder WHERE approval_status = 'pending'
+//       `
+//     );
+
+//     const pendingOrdersCount = pendingOrders.length;
+
+//     if (!user) {
+//       return <p className="text-red-600">User not found</p>;
+//     }
+
+//     return (
+//       <div className="space-y-3 sm:space-y-4 md:space-y-6 max-w-full">
+//         {/* Welcome Section - Enhanced Responsive Grid */}
+//         <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 sm:gap-5 md:gap-7">
+//           {/* Welcome Card - Takes 2 columns on large screens */}
+//           <div className="lg:col-span-2 bg-white rounded-lg sm:rounded-xl shadow-md p-3 sm:p-4 md:p-6 lg:p-8">
+//             <div className="flex items-center gap-2 sm:gap-3">
+//               <div className="w-10 h-10 sm:w-12 sm:h-12 md:w-16 md:h-16 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold text-lg sm:text-xl md:text-2xl shadow-lg flex-shrink-0">
+//                 {user.username.charAt(0).toUpperCase()}
+//               </div>
+//               <div className="space-y-0.5 sm:space-y-1 flex-1 min-w-0">
+//                 <h1 className="text-lg sm:text-2xl md:text-3xl lg:text-4xl font-semibold text-gray-900 tracking-tight break-words">
+//                   Welcome,{" "}
+//                   <span className="text-blue-600 break-all">
+//                     {user.username}
+//                   </span>
+//                 </h1>
+//                 <p className="text-xs sm:text-sm font-medium text-gray-500 truncate">
+//                   Role:{" "}
+//                   <span className="text-gray-700 font-semibold">
+//                     {user.userRole}
+//                   </span>
+//                 </p>
+//               </div>
+//             </div>
+//           </div>
+
+//           {/* Admin Stats Card - 1 column on large screens */}
+//           <div className="bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg sm:rounded-xl shadow-lg p-3 sm:p-4 md:p-6 text-white">
+//             <div className="flex flex-col h-full justify-between min-h-[100px]">
+//               <div>
+//                 <p className="text-xs sm:text-sm opacity-90 mb-1 sm:mb-2">
+//                   Control Panel
+//                 </p>
+//                 <p className="text-2xl sm:text-3xl md:text-4xl font-bold">
+//                   Admin
+//                 </p>
+//               </div>
+//               <div className="mt-3 sm:mt-4 pt-3 sm:pt-4 border-t border-white/20">
+//                 <p className="text-xs opacity-75">Full System Access</p>
+//               </div>
+//             </div>
+//           </div>
+
+//           {/* Admin Stats Card - 2 column on large screens */}
+//           <div className="bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg sm:rounded-xl shadow-lg p-3 sm:p-4 md:p-6 text-white">
+//             <div className="flex flex-col h-full justify-between min-h-[100px]">
+//               <div>
+//                 <p className="text-xs sm:text-sm opacity-90 mb-1 sm:mb-2">
+//                   Pending Orders
+//                 </p>
+//                 <p className="text-2xl sm:text-3xl md:text-4xl font-bold">
+//                   {pendingOrdersCount}
+//                 </p>
+//               </div>
+//               <div className="mt-3 sm:mt-4 pt-3 sm:pt-4 border-t border-white/20">
+//                 <a
+//                   href="/admin-dashboard/order"
+//                   className="px-4 py-2 bg-white text-purple-600 rounded-lg font-bold text-lg hover:bg-gray-100 transition-colors shadow-lg hover:scale-105 transform duration-200"
+//                 >
+//                   View Orders →
+//                 </a>
+//               </div>
+//             </div>
+//           </div>
+//         </div>
+
+//         {/* System Performance Dashboard - Featured Card */}
+//         <div className="bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 rounded-xl shadow-xl p-6 hover:shadow-2xl transition-all duration-300">
+//           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+//             <div className="text-white">
+//               <h2 className="text-2xl md:text-3xl font-bold mb-2">
+//                 📊 System Performance Dashboard
+//               </h2>
+//               <p className="text-white/90 text-sm md:text-base">
+//                 Monitor sales, delivery, payments, services & installations in
+//                 real-time
+//               </p>
+//               <div className="mt-4 flex flex-wrap gap-2">
+//                 <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+//                   Sales Analytics
+//                 </span>
+//                 <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+//                   Delivery Tracking
+//                 </span>
+//                 <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+//                   Payment Status
+//                 </span>
+//                 <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+//                   Service Metrics
+//                 </span>
+//               </div>
+//             </div>
+//             <a
+//               href="/admin-dashboard/stats"
+//               className="px-8 py-4 bg-white text-purple-600 rounded-lg font-bold text-lg hover:bg-gray-100 transition-colors shadow-lg hover:scale-105 transform duration-200"
+//             >
+//               View Dashboard →
+//             </a>
+//           </div>
+//         </div>
+
+//         {/* Stats Overview - Responsive Grid */}
+//         {/* <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+//           <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+//             <p className="text-xs md:text-sm text-gray-500 mb-1">Total Users</p>
+//             <p className="text-2xl md:text-3xl font-bold text-gray-900">-</p>
+//           </div>
+//           <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+//             <p className="text-xs md:text-sm text-gray-500 mb-1">Active Tasks</p>
+//             <p className="text-2xl md:text-3xl font-bold text-blue-600">-</p>
+//           </div>
+//           <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+//             <p className="text-xs md:text-sm text-gray-500 mb-1">Pending</p>
+//             <p className="text-2xl md:text-3xl font-bold text-orange-600">-</p>
+//           </div>
+//           <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+//             <p className="text-xs md:text-sm text-gray-500 mb-1">Completed</p>
+//             <p className="text-2xl md:text-3xl font-bold text-green-600">-</p>
+//           </div>
+//         </div> */}
+
+//         {/* Tasks Section - Full width responsive with better padding */}
+//         <div className="bg-white rounded-lg sm:rounded-xl shadow-md overflow-hidden">
+//           <div className="p-3 sm:p-4 md:p-6 border-b border-gray-200">
+//             <h2 className="text-base sm:text-lg md:text-xl font-semibold text-gray-900">
+//               Upcoming Tasks
+//             </h2>
+//           </div>
+//           <div className="overflow-x-auto">
+//             <UpcomingTasks leadSource={username} />
+//           </div>
+//         </div>
+//       </div>
+//     );
+//   } catch (error) {
+//     console.error("Dashboard error:", error.message);
+//     return <p className="text-red-600">Failed to load dashboard</p>;
+//   }
+// }
+
+// app/admin-dashboard/page.jsx
+import { cookies } from "next/headers";
+import { jwtVerify } from "jose";
+import { TextEncoder as NodeTextEncoder } from "util";
+import { getDbConnection } from "@/lib/db";
+import UpcomingTasks from "@/components/task/UpcomingTasksAdmin";
+import ProfileApprovalsCard from "@/components/ProfileApprovalsCard";
+import ScheduleVisitCard from "@/components/scheduleVisit/ScheduleVisitCard";
+import OverduePaymentCard from "@/components/OverduePaymentCard";
+import KeywordPerformanceQuickCard from "@/components/keywords/KeywordPerformanceQuickCard";
+import { Package, BarChart3, Upload, DollarSign, Calendar, Plane, FileText, ClipboardList, Users, Wrench, AlertTriangle } from "lucide-react";
+import ServiceTeamReportCard from "@/components/service/ServiceTeamReportCard";
+import ServiceSupportQuotesOrdersCard from "@/components/service/ServiceSupportQuotesOrdersCard";
+import ServiceSupportTotalCard from "@/components/service/ServiceSupportTotalCard";
+import PatDashboardCard from "@/components/admin/PatDashboardCard";
+import { SPECIAL_PRICE_PENDING_CONDITION } from "@/lib/specialPriceDefaults";
+import { getPendingProspectSubmissionsCount } from "@/lib/prospectSubmissionCounts";
+import {
+  ADMIN_SERVICE_HISTORY_NOT_COMPLETED_HREF,
+  getServiceRecordsNotCompletedCount,
+} from "@/lib/serviceRecordsPendingOver48h";
+import { countPendingAutoCheckoutApprovals } from "@/lib/countPendingAutoCheckoutApprovals";
+
+// import UpcomingLeads from "@/components/Leads/UpcommingLeads";
+
+const JWT_SECRET = process.env.JWT_SECRET || "your-secret";
+
+const TextEncoderImpl =
+  typeof TextEncoder !== "undefined" ? TextEncoder : NodeTextEncoder;
+
+export default async function UserDashboardPage() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get("token")?.value;
+
+  if (!token) {
+    return <p className="text-red-600">Unauthorized</p>;
+  }
+
+  try {
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoderImpl().encode(JWT_SECRET),
+    );
+
+    const username = payload.username;
+
+    const connection = await getDbConnection();
+
+    const [rows] = await connection.execute(
+      `
+      SELECT username, email, empId, userRole FROM emplist WHERE username = ?
+      UNION
+      SELECT username, email, empId, userRole FROM rep_list WHERE username = ?
+      `,
+      [username, username],
+    );
+    const user = rows[0];
+
+    const [pendingOrders] = await connection.execute(
+      `
+      SELECT * FROM neworder WHERE approval_status = 'pending'
+      `,
+    );
+
+    const pendingOrdersCount = pendingOrders.length;
+
+    const [pendingSpecialRows] = await connection.execute(
+      `
+      SELECT COUNT(*) AS total_pending
+      FROM special_price sp
+      JOIN customers c ON sp.customer_id = c.customer_id
+      WHERE ${SPECIAL_PRICE_PENDING_CONDITION}
+      `,
+    );
+    const pendingSpecialCount =
+      Number(pendingSpecialRows[0]?.total_pending ?? 0);
+
+    let regTotal = 0;
+    let regPending = 0;
+    try {
+      const [regTotalRows] = await connection.execute(
+        `SELECT COUNT(*) AS c
+         FROM attendance_regularization_requests
+         WHERE YEAR(log_date) = YEAR(CURDATE())
+           AND MONTH(log_date) = MONTH(CURDATE())`,
+      );
+      const [regPendingRows] = await connection.execute(
+        `SELECT COUNT(*) AS c
+         FROM attendance_regularization_requests
+         WHERE status = 'pending'
+           AND acknowledged_at IS NULL
+           AND YEAR(log_date) = YEAR(CURDATE())
+           AND MONTH(log_date) = MONTH(CURDATE())`,
+      );
+      regTotal = Number(regTotalRows[0]?.c ?? 0);
+      regPending = Number(regPendingRows[0]?.c ?? 0);
+    } catch (e) {
+      console.warn("attendance regularization counts:", e.message);
+    }
+
+    let pendingAutoCheckoutCount = 0;
+    try {
+      pendingAutoCheckoutCount = await countPendingAutoCheckoutApprovals(connection);
+    } catch (e) {
+      console.warn("pending auto checkout approvals count:", e.message);
+    }
+
+    // Fetch pending leave approvals count
+    let pendingLeaveCount = 0;
+    try {
+      const [pendingLeaveRows] = await connection.execute(
+        `SELECT COUNT(*) AS c FROM employee_leaves WHERE status = 'pending'`,
+      );
+      pendingLeaveCount = Number(pendingLeaveRows[0]?.c ?? 0);
+    } catch (e) {
+      console.warn("pending leave approvals count:", e.message);
+    }
+
+    // Fetch pending AMC/CMC count
+    let pendingAmcCmcCount = 0;
+    try {
+      const [pendingAmcCmcRows] = await connection.execute(
+        `SELECT COUNT(*) AS c FROM amc_cmc WHERE status = 'pending'`,
+      );
+      pendingAmcCmcCount = Number(pendingAmcCmcRows[0]?.c ?? 0);
+    } catch (e) {
+      console.warn("pending AMC/CMC count:", e.message);
+    }
+
+    let todayServiceTeamRows = [];
+    let todayServiceQuoteOrderRows = [];
+    let serviceSupportTotals = {
+      totalAmount: 0,
+      quotationCount: 0,
+      quotationAmount: 0,
+      orderProcessCount: 0,
+      orderProcessAmount: 0,
+    };
+    try {
+      const todayIst = new Date().toLocaleDateString("en-CA", {
+        timeZone: "Asia/Kolkata",
+      });
+      const [empRows] = await connection.execute(
+        `SELECT username FROM rep_list WHERE userRole = 'SERVICE SUPPORT' AND status = 1 ORDER BY username ASC`,
+      );
+      const employees = empRows.map((r) => r.username).filter(Boolean);
+      if (employees.length > 0) {
+        const placeholders = employees.map(() => "?").join(",");
+        const [mfRows] = await connection.execute(
+          `SELECT added_by AS username, COUNT(*) AS c FROM machines_followup
+           WHERE added_by IN (${placeholders})
+             AND DATE(followed_at) = ?
+           GROUP BY added_by`,
+          [...employees, todayIst],
+        );
+        const [cfRows] = await connection.execute(
+          `SELECT followed_by AS username, COUNT(*) AS c FROM customers_followup
+           WHERE followed_by IN (${placeholders})
+             AND followed_by IS NOT NULL AND followed_by != ''
+             AND DATE(followed_date) = ?
+           GROUP BY followed_by`,
+          [...employees, todayIst],
+        );
+        const mfMap = Object.fromEntries(mfRows.map((r) => [r.username, Number(r.c)]));
+        const cfMap = Object.fromEntries(cfRows.map((r) => [r.username, Number(r.c)]));
+        todayServiceTeamRows = employees.map((name) => ({
+          username: name,
+          machine: mfMap[name] || 0,
+          customer: cfMap[name] || 0,
+        }));
+
+        const [qtRows] = await connection.execute(
+          `SELECT emp_name AS username, COUNT(*) AS c FROM quotations_records
+           WHERE emp_name IN (${placeholders})
+             AND DATE(created_at) = ?
+           GROUP BY emp_name`,
+          [...employees, todayIst],
+        );
+        const [opRows] = await connection.execute(
+          `SELECT created_by AS username, COUNT(*) AS c FROM neworder
+           WHERE created_by IN (${placeholders})
+             AND DATE(created_at) = ?
+           GROUP BY created_by`,
+          [...employees, todayIst],
+        );
+        const qtMap = Object.fromEntries(qtRows.map((r) => [r.username, Number(r.c)]));
+        const opMap = Object.fromEntries(opRows.map((r) => [r.username, Number(r.c)]));
+        todayServiceQuoteOrderRows = employees.map((name) => ({
+          username: name,
+          quotes: qtMap[name] || 0,
+          orders: opMap[name] || 0,
+        }));
+
+        const [quoteTotalRows] = await connection.execute(
+          `SELECT
+            COUNT(*) AS count,
+            COALESCE(SUM(COALESCE(grand_total, 0)), 0) AS amount
+          FROM quotations_records
+          WHERE emp_name IN (${placeholders})`,
+          [...employees],
+        );
+        const [orderTotalRows] = await connection.execute(
+          `SELECT
+            COUNT(*) AS count,
+            COALESCE(SUM(
+              CASE
+                WHEN qr.grand_total > 0 THEN qr.grand_total
+                WHEN no.totalamt > 0 THEN no.totalamt
+                ELSE COALESCE(no.baseAmount, 0) + COALESCE(no.taxamt, 0)
+              END
+            ), 0) AS amount
+          FROM neworder no
+          LEFT JOIN quotations_records qr
+            ON no.quote_number COLLATE utf8mb4_unicode_ci = qr.quote_number COLLATE utf8mb4_unicode_ci
+          WHERE no.created_by IN (${placeholders})`,
+          [...employees],
+        );
+
+        const quotationAmount = parseFloat(quoteTotalRows[0]?.amount) || 0;
+        const orderProcessAmount = parseFloat(orderTotalRows[0]?.amount) || 0;
+        serviceSupportTotals = {
+          quotationCount: Number(quoteTotalRows[0]?.count) || 0,
+          quotationAmount,
+          orderProcessCount: Number(orderTotalRows[0]?.count) || 0,
+          orderProcessAmount,
+          totalAmount: quotationAmount + orderProcessAmount,
+        };
+      }
+    } catch (e) {
+      console.warn("today service support followup counts:", e.message);
+    }
+
+    let pendingProspectSubmissionsCount = 0;
+    try {
+      pendingProspectSubmissionsCount = await getPendingProspectSubmissionsCount(connection);
+    } catch (e) {
+      console.warn("pending prospect submissions count:", e.message);
+    }
+
+    let serviceNotCompletedCount = 0;
+    try {
+      serviceNotCompletedCount = await getServiceRecordsNotCompletedCount(connection);
+    } catch (e) {
+      console.warn("service records not completed count:", e.message);
+    }
+
+    if (!user) {
+      return <p className="text-red-600">User not found</p>;
+    }
+
+    return (
+      <div className="space-y-3 sm:space-y-4 md:space-y-6 max-w-full">
+        {/* Dashboard Cards Grid */}
+        <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 md:gap-3">
+
+          {/* Pending Orders */}
+          <a href="/admin-dashboard/order" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-blue-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Package className="w-5 h-5 text-blue-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    Pending Orders
+                  </h2>
+                </div>
+                <p className={`text-2xl font-bold mt-1 ${pendingOrdersCount === 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {pendingOrdersCount}
+                </p>
+              </div>
+            </div>
+          </a>
+
+          {/* Overdue Payments Card */}
+       
+
+          {/* System Performance Dashboard */}
+         
+
+          {/* Special Price Approvals */}
+          <a href="/admin-dashboard/special-pricing" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-indigo-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <DollarSign className="w-5 h-5 text-indigo-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    Special Price
+                  </h2>
+                </div>
+                <p className={`text-2xl font-bold mt-1 ${pendingSpecialCount === 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {pendingSpecialCount}
+                </p>
+              </div>
+            </div>
+          </a>
+
+          {/* Attendance Regularization */}
+          <a href="/admin-dashboard/attendance-regularization" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-orange-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Calendar className="w-5 h-5 text-orange-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    Attendance
+                  </h2>
+                </div>
+                <p className={`text-2xl font-bold mt-1 ${regPending === 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {regPending}
+                </p>
+                <p className="text-xs text-gray-600 mt-0.5">
+                  This month · {regTotal} total
+                </p>
+              </div>
+            </div>
+          </a>
+
+          {/* Automatic check-out approval */}
+          <a
+            href="/empcrm/admin-dashboard/auto-checkout-approvals"
+            className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-rose-500 min-h-[140px]"
+          >
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    Auto check-out
+                  </h2>
+                </div>
+                <p
+                  className={`text-2xl font-bold mt-1 ${
+                    pendingAutoCheckoutCount === 0
+                      ? "text-green-600"
+                      : "text-red-600"
+                  }`}
+                >
+                  {pendingAutoCheckoutCount}
+                </p>
+                <p className="text-xs text-gray-600 mt-0.5">
+                  Pending · this month
+                </p>
+              </div>
+            </div>
+          </a>
+
+          {/* Leave Approvals */}
+          <a href="/empcrm/admin-dashboard/leave" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-cyan-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Plane className="w-5 h-5 text-cyan-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    Leave Approvals
+                  </h2>
+                </div>
+                <p className={`text-2xl font-bold mt-1 ${pendingLeaveCount === 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {pendingLeaveCount}
+                </p>
+              </div>
+            </div>
+          </a>
+
+          {/* AMC/CMC Requests */}
+          <a href="/admin-dashboard/amc-cmc" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-red-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <FileText className="w-5 h-5 text-red-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    AMC/CMC
+                  </h2>
+                </div>
+                <p className={`text-2xl font-bold mt-1 ${pendingAmcCmcCount === 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {pendingAmcCmcCount}
+                </p>
+              </div>
+            </div>
+          </a>
+
+          {/* Profile Approvals - Dynamic Card Component */}
+          <ProfileApprovalsCard />
+          <PatDashboardCard />
+          <ScheduleVisitCard href="/admin-dashboard/schedule-visits" alwaysShow />
+          <OverduePaymentCard />
+          <KeywordPerformanceQuickCard />
+          <a href="/admin-dashboard/stats" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-purple-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div className="flex items-center gap-2 mb-2">
+                <BarChart3 className="w-5 h-5 text-purple-500 shrink-0" />
+                <h2 className="text-sm font-bold text-black leading-tight">
+                  System Performance
+                </h2>
+              </div>
+            </div>
+          </a>
+
+          {/* Sales Team Report */}
+          <a href="/admin-dashboard/today-reports?tab=sales" className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-blue-500 min-h-[140px]">
+            <div className="flex flex-col h-full justify-between">
+              <div className="flex items-center gap-2 mb-2">
+                <ClipboardList className="w-5 h-5 text-blue-500 shrink-0" />
+                <h2 className="text-sm font-bold text-black leading-tight">
+                  Sales Team Report
+                </h2>
+              </div>
+            </div>
+          </a>
+
+          {/* Service Team Report */}
+          <ServiceTeamReportCard rows={todayServiceTeamRows} />
+          <ServiceSupportTotalCard {...serviceSupportTotals} />
+          <ServiceSupportQuotesOrdersCard rows={todayServiceQuoteOrderRows} />
+
+          {/* All Prospect Submissions */}
+          <a
+            href="/admin-dashboard/prospect-submissions"
+            className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-violet-500 min-h-[140px]"
+          >
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Users className="w-5 h-5 text-violet-500 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    All Prospect Submissions
+                  </h2>
+                </div>
+                <p
+                  className={`text-2xl font-bold mt-1 ${
+                    pendingProspectSubmissionsCount === 0 ? "text-green-600" : "text-red-600"
+                  }`}
+                >
+                  {pendingProspectSubmissionsCount}
+                </p>
+                <p className="text-xs text-gray-600 mt-0.5">Pending review</p>
+              </div>
+            </div>
+          </a>
+
+          {/* Service records not completed */}
+          <a
+            href={ADMIN_SERVICE_HISTORY_NOT_COMPLETED_HREF}
+            className="bg-white rounded-lg shadow-md p-4 text-black hover:shadow-lg transition-shadow h-full cursor-pointer block border-l-4 border-red-600 min-h-[140px]"
+          >
+            <div className="flex flex-col h-full justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Wrench className="w-5 h-5 text-red-600 shrink-0" />
+                  <h2 className="text-sm font-bold text-black leading-tight">
+                    Service Not Completed
+                  </h2>
+                </div>
+                <p
+                  className={`text-2xl font-bold mt-1 ${
+                    serviceNotCompletedCount === 0
+                      ? "text-green-600"
+                      : "text-red-600"
+                  }`}
+                >
+                  {serviceNotCompletedCount}
+                </p>
+              </div>
+            </div>
+          </a>
+        </div>
+
+        {/* System Performance Dashboard - Featured Card */}
+        {/* <div className="bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 rounded-xl shadow-xl p-6 hover:shadow-2xl transition-all duration-300">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="text-white">
+              <h2 className="text-2xl md:text-3xl font-bold mb-2">
+                📊 System Performance Dashboard
+              </h2>
+              <p className="text-white/90 text-sm md:text-base">
+                Monitor sales, delivery, payments, services & installations in
+                real-time
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+                  Sales Analytics
+                </span>
+                <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+                  Delivery Tracking
+                </span>
+                <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+                  Payment Status
+                </span>
+                <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-medium">
+                  Service Metrics
+                </span>
+              </div>
+            </div>
+            <a
+              href="/admin-dashboard/stats"
+              className="px-8 py-4 bg-white text-purple-600 rounded-lg font-bold text-lg hover:bg-gray-100 transition-colors shadow-lg hover:scale-105 transform duration-200"
+            >
+              View Dashboard →
+            </a>
+          </div>
+        </div> */}
+
+        {/* Stats Overview - Responsive Grid */}
+        {/* <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+          <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+            <p className="text-xs md:text-sm text-gray-500 mb-1">Total Users</p>
+            <p className="text-2xl md:text-3xl font-bold text-gray-900">-</p>
+          </div>
+          <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+            <p className="text-xs md:text-sm text-gray-500 mb-1">Active Tasks</p>
+            <p className="text-2xl md:text-3xl font-bold text-blue-600">-</p>
+          </div>
+          <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+            <p className="text-xs md:text-sm text-gray-500 mb-1">Pending</p>
+            <p className="text-2xl md:text-3xl font-bold text-orange-600">-</p>
+          </div>
+          <div className="bg-white rounded-xl shadow-md p-4 md:p-5 hover:shadow-lg transition-shadow">
+            <p className="text-xs md:text-sm text-gray-500 mb-1">Completed</p>
+            <p className="text-2xl md:text-3xl font-bold text-green-600">-</p>
+          </div>
+        </div> */}
+
+        {/* Tasks Section - Full width responsive with better padding */}
+        {/* <div className="bg-white rounded-lg sm:rounded-xl shadow-md overflow-hidden">
+          <div className="p-3 sm:p-4 md:p-6 border-b border-gray-200">
+            <h2 className="text-base sm:text-lg md:text-xl font-semibold text-gray-900">
+              Upcoming Tasks
+            </h2>
+          </div>
+          <div className="overflow-x-auto">
+            <UpcomingTasks leadSource={username} />
+          </div>
+        </div> */}
+      </div>
+    );
+  } catch (error) {
+    console.error("Dashboard error:", error.message);
+    return <p className="text-red-600">Failed to load dashboard</p>;
+  }
+}

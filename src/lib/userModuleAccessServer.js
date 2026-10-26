@@ -1,0 +1,94 @@
+import { getDbConnection } from "@/lib/db";
+import { normalizeRoleKey } from "@/lib/roleKeyUtils";
+import {
+  ALL_MODULE_KEYS,
+  parseModuleAccess,
+  resolveModuleAccess,
+  applySuperadminOnlyModuleRestrictions,
+  applyRoleDenyModuleRestrictions,
+  isModuleKeyAllowed,
+} from "@/lib/moduleAccess";
+
+function uniqueStrings(arr) {
+  return [...new Set((arr || []).map((v) => String(v || "").trim()).filter(Boolean))];
+}
+
+/**
+ * Returns the effective allowed module keys for a user, after applying the same
+ * restriction pipeline used by the user sidebar.
+ *
+ * - `null` means "not configured / treat as full access" (legacy backward-compat),
+ *   except SUPERADMIN which is always explicit.
+ * - `[]` means explicitly no access (or unknown user / DB read failure fail-closed).
+ */
+export async function getEffectiveAllowedModuleKeys(username, role) {
+  const roleKey = normalizeRoleKey(role || "") || String(role || "").trim().toUpperCase();
+  if (roleKey === "SUPERADMIN") {
+    return uniqueStrings(
+      applySuperadminOnlyModuleRestrictions([...ALL_MODULE_KEYS], roleKey) ?? [],
+    );
+  }
+
+  const u = String(username || "").trim();
+  if (!u) return [];
+
+  let allowedRaw = null;
+  let conn;
+  try {
+    const pool = await getDbConnection();
+    conn = await pool.getConnection();
+    const [rows] = await conn.execute(
+      "SELECT module_access, userRole FROM rep_list WHERE username = ? LIMIT 1",
+      [u],
+    );
+    if (!rows.length) return [];
+    allowedRaw = resolveModuleAccess(rows[0].module_access ?? null, rows[0].userRole ?? role);
+  } catch (err) {
+    const msg = String(err?.message || "").toLowerCase();
+    if (msg.includes("unknown column") && msg.includes("module_access")) {
+      return resolveModuleAccess(null, roleKey);
+    }
+    return [];
+  } finally {
+    if (conn) {
+      try {
+        await conn.release();
+      } catch (releaseError) {
+        console.error("❌ Error releasing connection in getEffectiveAllowedModuleKeys:", releaseError);
+      }
+    }
+  }
+
+  let next = applySuperadminOnlyModuleRestrictions(allowedRaw, roleKey) ?? [];
+  next = applyRoleDenyModuleRestrictions(next, roleKey) ?? [];
+  if (roleKey === "ACCOUNTANT") {
+    next = uniqueStrings([
+      ...(next || []),
+      "salary-management",
+      "salary-sheet",
+      "attendance-sheet",
+    ]);
+  }
+  return uniqueStrings(next);
+}
+
+export async function userHasManualPaymentsModuleAccess(username, role) {
+  return userHasModuleKey(username, role, "manual-payments");
+}
+
+export async function userHasModuleKey(username, role, moduleKey) {
+  const key = String(moduleKey || "").trim();
+  if (!key) return false;
+
+  const roleKey = normalizeRoleKey(role || "") || String(role || "").trim().toUpperCase();
+  if (roleKey === "SUPERADMIN") return true;
+
+  const allowed = await getEffectiveAllowedModuleKeys(username, role);
+  if (allowed === null) {
+    const base = applySuperadminOnlyModuleRestrictions([...ALL_MODULE_KEYS], roleKey) ?? [];
+    const base2 = applyRoleDenyModuleRestrictions(base, roleKey) ?? [];
+    return isModuleKeyAllowed(key, uniqueStrings(base2));
+  }
+
+  return isModuleKeyAllowed(key, allowed);
+}

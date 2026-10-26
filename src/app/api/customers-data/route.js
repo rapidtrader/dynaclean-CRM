@@ -1,0 +1,283 @@
+// app/api/customers-data/route.js
+import { getDbConnection } from "@/lib/db";
+import { NextResponse } from "next/server";
+import { getSessionPayload } from "@/lib/auth";
+import {
+  buildGemCustomerScopeWhere,
+  buildOwnershipWhere,
+  canViewAllCustomers,
+  getScopedUsername,
+} from "@/lib/dataScope";
+import { normalizeRoleKey } from "@/lib/roleKeyUtils";
+import {
+  isServiceSupportRole,
+  sqlServiceSupportCustomerScope,
+  SQL_ACTIVE_SERVICE_SUPPORT_USERNAMES,
+} from "@/lib/serviceSupportTeamScope";
+
+export async function GET(req) {
+  const conn = await getDbConnection();
+
+  try {
+    const payload = await getSessionPayload();
+    if (!payload) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const role = String(payload.role || payload.userRole || "");
+    const username = getScopedUsername(payload);
+
+    const { searchParams } = new URL(req.url);
+    const mode = searchParams.get("mode") || "table";
+    const globalSearch = searchParams.get("global") === "1";
+
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+    const leadCampaign = searchParams.get("leadCampaign");
+    const status = searchParams.get("status");
+    const employeeName = searchParams.get("employeeName");
+    const stage = searchParams.get("stage");
+    const contactedTimeFilter = searchParams.get("contactedTimeFilter");
+    const page = Math.max(parseInt(searchParams.get("page") || "1", 10), 1);
+    const pageSizeRaw = parseInt(searchParams.get("pageSize") || "50", 10);
+    const pageSize = Math.min(Math.max(pageSizeRaw || 50, 10), 200);
+
+    const [employeeRows] = await conn.execute(
+      `SELECT username FROM rep_list where status = 1 `
+    );
+    let employees = employeeRows.map((row) => row.username);
+
+    // Employee filter dropdown:
+    // Privileged roles can filter by any rep; everyone else should only see themselves.
+    if (!canViewAllCustomers(role)) {
+      if (isServiceSupportRole(role)) {
+        const [ssRows] = await conn.execute(SQL_ACTIVE_SERVICE_SUPPORT_USERNAMES);
+        employees = ssRows.map((row) => row.username).filter(Boolean);
+      } else {
+        employees = username ? [username] : [];
+      }
+    }
+
+    let whereClause = " WHERE 1=1";
+    const params = [];
+
+    if (startDate && endDate) {
+      const startDateTime = `${startDate} 00:00:00`;
+      const endDateTime = `${endDate} 23:59:59`;
+
+      whereClause += " AND date_created BETWEEN ? AND ?";
+      params.push(startDateTime, endDateTime);
+    }
+
+    if (leadCampaign && leadCampaign !== "all") {
+      whereClause += " AND lead_campaign = ?";
+      params.push(leadCampaign);
+    }
+    if (status && status !== "all") {
+      whereClause += " AND status = ?";
+      params.push(status);
+    }
+    if (stage && stage !== "all") {
+      whereClause += " AND stage = ?";
+      params.push(stage);
+    }
+
+    // Data visibility:
+    // Privileged roles (incl. SALES CUM BACKOFFICE) → all rows incl. Denied
+    // When globalSearch=1 (header search): SERVICE SUPPORT sees processed-order customers
+    // GEM → own customers (lead_source, gem_lead_source, assignment, follow-up)
+    // everyone else → only rows assigned/owned by them (or deny if username missing)
+    if (!canViewAllCustomers(role)) {
+      const normalizedRole = normalizeRoleKey(role);
+
+      if (globalSearch && normalizedRole === "SERVICE SUPPORT") {
+        // SERVICE SUPPORT global header search: only customers with at least one fully processed order
+        // (account_status = 1 AND dispatch_status = 1)
+        // Use subquery with no outer-table reference so it works in both countSql (no alias) and dataSql (alias c)
+        whereClause += ` AND customer_id IN (
+          SELECT DISTINCT customer_id FROM neworder
+          WHERE account_status = 1
+            AND dispatch_status = 1
+        )`;
+      } else if (normalizedRole === "SERVICE SUPPORT") {
+        whereClause += ` AND ${sqlServiceSupportCustomerScope()}`;
+      } else if (normalizedRole === "GEM") {
+        const gemScope = buildGemCustomerScopeWhere({ username });
+        whereClause += ` AND ${gemScope.sql}`;
+        params.push(...gemScope.params);
+      } else {
+        const ownership = buildOwnershipWhere({
+          role,
+          username,
+          columns: ["lead_source", "sales_representative", "assigned_to"],
+        });
+        if (ownership.sql) {
+          whereClause += ` AND ${ownership.sql}`;
+          params.push(...ownership.params);
+        }
+      }
+    }
+
+    // Optional employee filter (only within already-visible rows)
+    if (employeeName && employeeName !== "all") {
+      whereClause += " AND (lead_source = ? OR sales_representative = ? OR assigned_to = ?)";
+      params.push(employeeName, employeeName, employeeName);
+    }
+
+    
+    // search functionality (ID, phone, name, email - matches All Clients)
+    const search = searchParams.get("search");
+
+    if (search && search.trim()) {
+      const like = `%${search.trim()}%`;
+
+      whereClause += `
+    AND (
+      first_name LIKE ?
+      OR last_name LIKE ?
+      OR company LIKE ?
+      OR email LIKE ?
+      OR CAST(phone AS CHAR) LIKE ?
+      OR CAST(customer_id AS CHAR) LIKE ?
+      OR lead_source LIKE ?
+      OR sales_representative LIKE ?
+      OR assigned_to LIKE ?
+    )
+  `;
+
+      params.push(like, like, like, like, like, like, like, like, like);
+    }
+
+    if (mode === "charts") {
+      const statusSql =
+        "SELECT status, COUNT(*) as count FROM customers" +
+        whereClause +
+        " GROUP BY status";
+      const campaignSql =
+        "SELECT lead_campaign as campaign, COUNT(*) as count FROM customers" +
+        whereClause +
+        " GROUP BY lead_campaign";
+      const stageSql =
+        "SELECT stage, COUNT(*) as count FROM customers" +
+        whereClause +
+        " GROUP BY stage";
+
+      const [statusRows] = await conn.execute(statusSql, params);
+      const [campaignRows] = await conn.execute(campaignSql, params);
+      const [stageRows] = await conn.execute(stageSql, params);
+
+      return NextResponse.json({
+        employees,
+        statusStats: statusRows,
+        campaignStats: campaignRows,
+        stageStats: stageRows,
+      });
+    }
+
+    const countSql = "SELECT COUNT(*) as total FROM customers" + whereClause;
+    const [countRows] = await conn.execute(countSql, params);
+    const total = countRows[0]?.total || 0;
+    const totalPages =
+      total === 0 ? 1 : Math.max(Math.ceil(total / pageSize), 1);
+    const currentPage = Math.min(page, totalPages);
+    const offset = (currentPage - 1) * pageSize;
+
+    // Check if service_lead_source column exists
+    let serviceLeadSourceColumn = null;
+    try {
+      const [columns] = await conn.execute("SHOW COLUMNS FROM customers LIKE 'service_lead_source'");
+      if (columns.length > 0) {
+        serviceLeadSourceColumn = "c.service_lead_source,";
+      } else {
+        serviceLeadSourceColumn = "";
+      }
+    } catch (e) {
+      serviceLeadSourceColumn = "";
+    }
+    
+    let orderByClause = " ORDER BY c.date_created DESC";
+    const orderByParams = [];
+    if (globalSearch && search && search.trim()) {
+      const term = search.trim();
+      if (/^\d{5,9}$/.test(term)) {
+        const id = parseInt(term, 10);
+        if (!Number.isNaN(id)) {
+          orderByClause =
+            " ORDER BY CASE WHEN c.customer_id = ? THEN 0 ELSE 1 END, c.date_created DESC";
+          orderByParams.push(id);
+        }
+      } else if (/^\d{10}$/.test(term)) {
+        orderByClause =
+          " ORDER BY CASE WHEN RIGHT(REPLACE(REPLACE(REPLACE(CAST(c.phone AS CHAR), ' ', ''), '-', ''), '+91', ''), 10) = ? THEN 0 ELSE 1 END, c.date_created DESC";
+        orderByParams.push(term);
+      }
+    }
+
+    const dataSql =
+      "SELECT c.customer_id, c.date_created, c.lead_campaign, c.first_name, c.last_name, c.company, c.phone, c.status, c.lead_source, c.address, c.state, " + serviceLeadSourceColumn + " c.stage, " +
+      "(SELECT MIN(cf.followed_date) FROM customers_followup cf WHERE cf.customer_id = c.customer_id) as contacted_time, " +
+      "(SELECT cf.next_followup_date FROM customers_followup cf WHERE cf.customer_id = c.customer_id AND cf.next_followup_date IS NOT NULL ORDER BY cf.followed_date ASC LIMIT 1) as next_followup_time, " +
+      "(SELECT COUNT(*) FROM customers_followup cf WHERE cf.customer_id = c.customer_id) as followup_count " +
+      "FROM customers c" +
+      whereClause +
+      orderByClause +
+      " LIMIT ? OFFSET ?";
+
+    const dataParams = [...params, ...orderByParams, pageSize, offset];
+    const [customerRows] = await conn.execute(dataSql, dataParams);
+
+    // Apply contacted time filter in application layer
+    let filteredCustomers = customerRows;
+    if (contactedTimeFilter && contactedTimeFilter !== "all") {
+      const timeLimits = {
+        "1min": 1,
+        "2min": 2,
+        "3min": 3,
+        "4min": 4,
+        "5min": 5,
+        "10min": 10,
+        "15min": 15,
+        "20min": 20,
+        "30min": 30,
+        "1hour": 60,
+        "2hour": 120,
+        "3hour": 180,
+        "4hour": 240,
+        "5hour": 300
+      };
+      
+      if (contactedTimeFilter === "morethan5hour") {
+        filteredCustomers = customerRows.filter(customer => {
+          if (!customer.contacted_time || !customer.next_followup_time) return false;
+          const diffMs = new Date(customer.next_followup_time) - new Date(customer.contacted_time);
+          const diffMinutes = Math.floor(diffMs / (1000 * 60));
+          return diffMinutes > 300;
+        });
+      } else if (timeLimits[contactedTimeFilter]) {
+        const maxMinutes = timeLimits[contactedTimeFilter];
+        filteredCustomers = customerRows.filter(customer => {
+          if (!customer.contacted_time || !customer.next_followup_time) return false;
+          const diffMs = new Date(customer.next_followup_time) - new Date(customer.contacted_time);
+          const diffMinutes = Math.floor(diffMs / (1000 * 60));
+          return diffMinutes <= maxMinutes;
+        });
+      }
+    }
+
+    return NextResponse.json({
+      customers: filteredCustomers,
+      employees,
+      total,
+      totalPages,
+      currentPage,
+      pageSize,
+    });
+  } catch (error) {
+    console.error("Database query error:", error);
+
+    return NextResponse.json(
+      { error: "Failed to fetch data" },
+      { status: 500 }
+    );
+  }
+}

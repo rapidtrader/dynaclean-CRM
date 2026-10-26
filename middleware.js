@@ -1,0 +1,419 @@
+import { NextResponse } from "next/server";
+import { jwtVerify } from "jose";
+import { normalizeRoleKey, isJwtAccountingRole } from "@/lib/roleKeyUtils";
+import { getRoleDashboardPath } from "@/lib/getRoleDashboardPath";
+
+/** Attendance rules: SUPERADMIN + ADMIN + HR roles. */
+const ATTENDANCE_RULES_MIDDLEWARE_ROLES = [
+  "SUPERADMIN",
+  "ADMIN",
+  "HR",
+  "HR HEAD",
+  "HR Executive",
+];
+
+const secret = new TextEncoder().encode(process.env.JWT_SECRET);
+
+/** Schedule visit pages across all dashboard prefixes */
+function isScheduleVisitPath(pathname) {
+  return (
+    pathname.includes("/schedule-visits") ||
+    /\/view-customer\/[^/]+\/schedule-visit(?:\/|$)/.test(pathname)
+  );
+}
+
+export async function middleware(request) {
+  const { pathname } = request.nextUrl;
+
+  const impersonationToken = request.cookies.get("impersonation_token")?.value;
+  const mainToken = request.cookies.get("token")?.value;
+  const token = impersonationToken || mainToken;    
+
+  // Schedule visit API — require valid session (module access enforced in route handlers)
+  if (pathname.startsWith("/api/schedule-visit")) {
+    if (!token) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
+    try {
+      await jwtVerify(token, secret);
+      return NextResponse.next();
+    } catch {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
+  // Redirect root to login
+  if (pathname === "/") {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  // If already logged in and visiting /login, redirect to dashboard
+  if (pathname === "/login" && token) {
+    try {
+      const { payload } = await jwtVerify(token, secret);
+      const role = payload.role;
+      const roleNorm = String(role ?? "").trim().toUpperCase();
+
+      const home = getRoleDashboardPath(role);
+      return NextResponse.redirect(new URL(home, request.url));
+    } catch {
+      return NextResponse.next();
+    }
+  }
+
+  // Protected routes
+  if (
+    pathname.startsWith("/admin-dashboard") ||
+    pathname.startsWith("/user-dashboard") ||
+    pathname.startsWith("/director-dashboard") ||
+    pathname.startsWith("/empcrm") ||
+    pathname.startsWith("/sales-dashboard") ||
+    pathname.startsWith("/service-head-dashboard") ||
+    pathname.startsWith("/hr-dashboard") ||
+    pathname.startsWith("/digital-marketing-dashboard") ||
+    pathname.startsWith("/accounts-dashboard") ||
+    pathname.startsWith("/accountant-dashboard") ||
+    pathname.startsWith("/gem-dashboard") ||
+    pathname.startsWith("/third-party-engineer-dashboard")
+  ) {
+    if (!token) {
+      return NextResponse.redirect(new URL("/login", request.url));
+    }
+
+    try {
+      const { payload } = await jwtVerify(token, secret);
+      const role = payload.role;
+      const isImpersonated = payload.impersonated;
+      const roleKey = normalizeRoleKey(role || "");
+      const roleNorm = String(role ?? "").trim().toUpperCase();
+
+      // Schedule visit module pages — allow all authenticated dashboard roles;
+      // sidebar/module_access still controls visibility in the app.
+      if (isScheduleVisitPath(pathname)) {
+        return NextResponse.next();
+      }
+
+      // Same roles as getAdminSidebarMenuItems "Attendance rules" — must not block here,
+      // otherwise ADMIN/HR see the link but middleware sends them to /user-dashboard.
+      if (
+        pathname.startsWith("/admin-dashboard/attendance-rules") ||
+        pathname.startsWith("/hr-dashboard/attendance-rules")
+      ) {
+        const canAttendanceRules = ATTENDANCE_RULES_MIDDLEWARE_ROLES.some(
+          (r) => normalizeRoleKey(r) === roleKey,
+        );
+        if (canAttendanceRules) {
+          return NextResponse.next();
+        }
+      }
+
+      // Allow accountants to access accounts-dashboard (all routes)
+      if (pathname.startsWith("/accounts-dashboard")) {
+        if (isJwtAccountingRole(role)) {
+          return NextResponse.next();
+        }
+        const adminAccountsPrefixes = [
+          "/accounts-dashboard/purchase-products",
+          "/accounts-dashboard/delivery-challan",
+        ];
+        if (
+          roleKey === "ADMIN" &&
+          adminAccountsPrefixes.some((p) => pathname.startsWith(p))
+        ) {
+          return NextResponse.next();
+        }
+        // If accountant/admin role not found, fall through to generic checks
+      }
+
+      // Allow accountants to access accountant-dashboard (all routes)
+      if (pathname.startsWith("/accountant-dashboard")) {
+        if (isJwtAccountingRole(role)) {
+          return NextResponse.next();
+        }
+        // Only accounting roles allowed on accountant-dashboard
+        const dest = new URL("/user-dashboard", request.url);
+        dest.search = request.nextUrl.search;
+        return NextResponse.redirect(dest);
+      }
+
+      // Prospects: sales roles use sales-dashboard copy; admin/director stay on admin.
+      if (pathname.startsWith("/admin-dashboard/prospects")) {
+        if (roleNorm.includes("SALES") && role !== "SUPERADMIN") {
+          const dest = new URL(
+            pathname.replace("/admin-dashboard", "/sales-dashboard"),
+            request.url,
+          );
+          dest.search = request.nextUrl.search;
+          return NextResponse.redirect(dest);
+        }
+        if (["SUPERADMIN", "ADMIN", "DIRECTOR"].includes(role) || roleNorm === "DIRECTOR") {
+          return NextResponse.next();
+        }
+      }
+
+      // Allow accountant (+ variants e.g. Production Accountant) admin pages before global redirect.
+      const ACCOUNTANT_ADMIN_PREFIXES = [
+        "/admin-dashboard/client-expenses",
+        "/admin-dashboard/statements",
+        "/admin-dashboard/all-expenses",
+        "/admin-dashboard/credit-notes",
+        "/admin-dashboard/ledger",
+        "/admin-dashboard/bank-masters",
+        "/admin-dashboard/paid-leave-ledger",
+      ];
+      if (ACCOUNTANT_ADMIN_PREFIXES.some((p) => pathname.startsWith(p))) {
+        if (isJwtAccountingRole(role) || role === "ADMIN") {
+          return NextResponse.next();
+        }
+      }
+
+      if (roleKey === "ADMIN") {
+        if (pathname.startsWith("/admin-dashboard/purchase-products")) {
+          const dest = new URL(
+            pathname.replace("/admin-dashboard", "/accounts-dashboard"),
+            request.url,
+          );
+          dest.search = request.nextUrl.search;
+          return NextResponse.redirect(dest);
+        }
+        if (pathname.startsWith("/admin-dashboard/delivery-challan")) {
+          const dest = new URL(
+            pathname.replace("/admin-dashboard", "/accounts-dashboard"),
+            request.url,
+          );
+          dest.search = request.nextUrl.search;
+          return NextResponse.redirect(dest);
+        }
+      }
+
+      if (roleNorm === "SALES CUM BACKOFFICE") {
+        if (pathname.startsWith("/admin-dashboard/reports/payment-pending")) {
+          const dest = new URL(
+            pathname.replace("/admin-dashboard", "/sales-dashboard"),
+            request.url,
+          );
+          dest.search = request.nextUrl.search;
+          return NextResponse.redirect(dest);
+        }
+      }
+
+      if (pathname.startsWith("/admin-dashboard") && role !== "SUPERADMIN" && roleNorm !== "DIRECTOR") {
+        // Allow EA for employee-related admin routes
+        const eaAllowedRoutes = [
+          "/admin-dashboard/employees",
+          "/admin-dashboard/create-employee",
+          "/admin-dashboard/password",
+          "/admin-dashboard/quick-edit",
+          "/admin-dashboard/ip-restrictions",
+          "/admin-dashboard/customers",
+          "/admin-dashboard/view-customer",
+          "/admin-dashboard/invoices",
+        ];
+        const isEaAllowed = eaAllowedRoutes.some(route => pathname.startsWith(route));
+        
+        // Allow Team Leader for denied-leads, view-customer, accounting/ledger, and invoices/buyer pages
+        const isTeamLeader = roleNorm.includes("TEAM LEADER");
+        const isSales = roleNorm.includes("SALES");
+        const isSalesCumBackoffice = roleNorm === "SALES CUM BACKOFFICE";
+        const isDeniedLeadsRoute = pathname.startsWith("/admin-dashboard/denied-leads");
+        const isViewCustomerRoute = pathname.startsWith("/admin-dashboard/view-customer");
+        const isBulkReassignRoute = pathname.startsWith("/admin-dashboard/bulk-reassign");
+        const isAccountingLedgerRoute = pathname.startsWith("/admin-dashboard/accounting/ledger");
+        const isInvoicesBuyerRoute = pathname.startsWith("/admin-dashboard/invoices/buyer");
+        const isPartiesRoute = pathname.startsWith("/admin-dashboard/parties");
+        const isPurchaseProductsRoute = pathname.startsWith("/admin-dashboard/purchase-products");
+        const isManualPaymentsRoute = pathname.startsWith("/admin-dashboard/manual-payments");
+        const isSalesDashboardManualPaymentsRoute = pathname.startsWith("/sales-dashboard/manual-payments");
+        const isScheduleVisitAdminRoute =
+          pathname.startsWith("/admin-dashboard/schedule-visits") ||
+          (pathname.startsWith("/admin-dashboard/view-customer") &&
+            pathname.includes("/schedule-visit"));
+        
+        // Allow everyone to access allowed admin routes that are module-gated in sidebar.
+        const isEveryoneAllowedRoute =
+          isAccountingLedgerRoute ||
+          isInvoicesBuyerRoute ||
+          isPartiesRoute ||
+          isPurchaseProductsRoute ||
+          isScheduleVisitAdminRoute;
+        
+        const isServiceSupportReport = pathname.startsWith("/admin-dashboard/service-support-report");
+        const isServiceHead = roleNorm === "SERVICE HEAD";
+        const isServiceSupport = roleNorm === "SERVICE SUPPORT";
+
+        if (
+          !(roleNorm === "EA" && isEaAllowed) &&
+          !(isTeamLeader && (isDeniedLeadsRoute || isViewCustomerRoute)) &&
+          !(isSales && (isDeniedLeadsRoute || isViewCustomerRoute || isBulkReassignRoute)) &&
+          !(isSalesCumBackoffice && (isBulkReassignRoute || isManualPaymentsRoute || isSalesDashboardManualPaymentsRoute)) &&
+          !(isServiceHead && isServiceSupportReport) &&
+          !(isServiceSupport && isServiceSupportReport) &&
+          !(roleNorm === "EA" && isServiceSupportReport) &&
+          !isEveryoneAllowedRoute
+        ) {
+          const dest = new URL("/user-dashboard", request.url);
+          dest.search = request.nextUrl.search;
+          return NextResponse.redirect(dest);
+        }
+      }
+
+      // Allow EA to access service reports, service-followups, and amc-cmc in user-dashboard
+      if (pathname.startsWith("/user-dashboard/view_service_reports") || 
+          pathname.startsWith("/user-dashboard/service-followups") ||
+          pathname.startsWith("/user-dashboard/service-support-report") ||
+          pathname.startsWith("/service-head-dashboard/service-support-report") ||
+          pathname.startsWith("/user-dashboard/amc-cmc")) {
+        if (
+          roleNorm === "EA" ||
+          role === "SUPERADMIN" ||
+          roleNorm === "DIRECTOR" ||
+          roleNorm === "SERVICE HEAD" ||
+          roleNorm === "SERVICE SUPPORT" ||
+          roleNorm === "ADMIN"
+        ) {
+          return NextResponse.next();
+        }
+      }
+      
+      // Allow EA access to /ea-dashboard
+      if (pathname.startsWith("/ea-dashboard")) {
+        if (roleNorm !== "EA" && role !== "SUPERADMIN" && roleNorm !== "DIRECTOR") {
+          const dest = new URL("/user-dashboard", request.url);
+          dest.search = request.nextUrl.search;
+          return NextResponse.redirect(dest);
+        }
+      }
+
+      // SUPERADMIN-only modules (even if link is known)
+      if (pathname.startsWith("/admin-dashboard/import-crm")) {
+        if (role !== "SUPERADMIN" && roleNorm !== "DIRECTOR") {
+          return NextResponse.redirect(new URL("/admin-dashboard", request.url));
+        }
+      }
+
+      if (pathname.startsWith("/admin-dashboard/hiring-process")) {
+        if (role !== "SUPERADMIN" && roleNorm !== "DIRECTOR") {
+          return NextResponse.redirect(new URL("/admin-dashboard", request.url));
+        }
+      }
+
+      if (pathname.startsWith("/admin-dashboard/gem-crm")) {
+        if (role !== "SUPERADMIN" && roleNorm !== "DIRECTOR") {
+          return NextResponse.redirect(new URL("/admin-dashboard", request.url));
+        }
+      }
+
+      if (pathname.startsWith("/empcrm/admin-dashboard/profile/approvals-admin")) {
+        if (role !== "SUPERADMIN") {
+          return NextResponse.redirect(new URL("/empcrm/user-dashboard", request.url));
+        }
+      }
+
+      if (pathname.startsWith("/empcrm/admin-dashboard")) {
+        const roleKey = normalizeRoleKey(role || "");
+        const hrEmpCrmRoles = ["SUPERADMIN", "HR HEAD", "HR", "HR Executive", "JUNIOR HR EXECUTIVE", "HR RECRUITER"];
+        const isHrEmpCrm = hrEmpCrmRoles.some(
+          (r) => normalizeRoleKey(r) === roleKey,
+        );
+        // Accountant: Salary management and salary slips (see getEmpCrmAdminSidebarMenuItems)
+        const isAccountantSalaryAccess =
+          roleKey === "ACCOUNTANT" &&
+          (pathname.startsWith("/empcrm/admin-dashboard/salary") ||
+           pathname.startsWith("/empcrm/admin-dashboard/salary-sheet") ||
+           pathname.startsWith("/empcrm/admin-dashboard/salary-slips") ||
+           pathname.startsWith("/empcrm/admin-dashboard/attendance-sheet"));
+        if (!isHrEmpCrm && !isAccountantSalaryAccess) {
+          return NextResponse.redirect(new URL("/empcrm/user-dashboard", request.url));
+        }
+      }
+
+      // Allow digital marketers to access my-leads with social_media campaign
+      if (
+        pathname.startsWith("/user-dashboard/my-leads") &&
+        (roleNorm.includes("DIGITAL") || roleNorm.includes("MARKETER"))
+      ) {
+        return NextResponse.next();
+      }
+
+      // Director CRM sidebar uses /director-dashboard URLs (rewritten to user-dashboard pages).
+      if (roleNorm === "DIRECTOR" && pathname.startsWith("/user-dashboard")) {
+        const dest = new URL(
+          pathname.replace(/^\/user-dashboard/, "/director-dashboard"),
+          request.url,
+        );
+        dest.search = request.nextUrl.search;
+        return NextResponse.redirect(dest);
+      }
+
+      const thirdPartyServicePrefixes = [
+        "/user-dashboard/complete-service",
+        "/user-dashboard/update-service",
+        "/user-dashboard/view-service-report",
+        "/user-dashboard/service-report-steps",
+        "/user-dashboard/installation-completion-video",
+      ];
+
+      if (roleNorm === "THIRD PARTY ENGINEER") {
+        if (pathname.startsWith("/third-party-engineer-dashboard")) {
+          return NextResponse.next();
+        }
+        if (thirdPartyServicePrefixes.some((p) => pathname.startsWith(p))) {
+          return NextResponse.next();
+        }
+        if (pathname.startsWith("/user-dashboard")) {
+          return NextResponse.redirect(
+            new URL("/third-party-engineer-dashboard", request.url),
+          );
+        }
+      }
+
+      if (
+        pathname.startsWith("/third-party-engineer-dashboard") &&
+        roleNorm !== "THIRD PARTY ENGINEER"
+      ) {
+        return NextResponse.redirect(new URL("/user-dashboard", request.url));
+      }
+
+      if (
+        pathname.startsWith("/user-dashboard") &&
+        role === "SUPERADMIN" &&
+        !isImpersonated
+      ) {
+        // Allow 24h DM leads (admin sidebar links here; module is SUPERADMIN + Digital Marketer only)
+        if (pathname.startsWith("/user-dashboard/digital-marketer-leads")) {
+          return NextResponse.next();
+        }
+        if (isScheduleVisitPath(pathname)) {
+          return NextResponse.next();
+        }
+        return NextResponse.redirect(new URL("/admin-dashboard", request.url));
+      }
+
+      return NextResponse.next();
+    } catch {
+      return NextResponse.redirect(new URL("/login", request.url));
+    }
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: [
+    "/",
+    "/director-dashboard/:path*",
+    "/login",
+    "/admin-dashboard/:path*",
+    "/user-dashboard/:path*",
+    "/empcrm/:path*",
+    "/sales-dashboard/:path*",
+    "/service-head-dashboard/:path*",
+    "/hr-dashboard/:path*",
+    "/digital-marketing-dashboard/:path*",
+    "/accounts-dashboard/:path*",
+    "/accountant-dashboard/:path*",
+    "/api/schedule-visit",
+    "/api/schedule-visit/:path*",
+    "/third-party-engineer-dashboard/:path*",
+  ],
+};

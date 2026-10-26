@@ -1,0 +1,128 @@
+// /api/stock/check-single-item/route.js
+import { getDbConnection } from "@/lib/db";
+import { isSpare1110 } from "@/lib/isSpare1110";
+
+export async function POST(req) {
+  try {
+    const { quote_number, godown, item_code } = await req.json();
+
+    if (!quote_number || !godown || !item_code) {
+      return new Response(JSON.stringify({ error: "Quote number, godown, and item_code are required" }), { status: 400 });
+    }
+
+    const conn = await getDbConnection();
+
+    const locationColumn = godown === "Delhi - Mundka" ? "Delhi" : "South";
+
+    console.log("Stock check - godown:", godown, "locationColumn:", locationColumn, "item_code:", item_code);
+
+    let stockResults = [];
+    let allowZeroStock = isSpare1110(item_code);
+
+    // Check if item_code contains alphabets
+    const containsAlphabets = /[a-zA-Z]/.test(item_code);
+
+    if (containsAlphabets) {
+      // First, get the correct product_code from products_list
+      // The dispatch might have full name like "Electric Road Sweeper DRS-3000EV"
+      // but products_list might have just "DRS-3000EV"
+      let actualProductCode = item_code;
+
+      const [productCheck] = await conn.execute(
+        `SELECT item_code, item_name FROM products_list WHERE item_code = ? OR item_name = ?`,
+        [item_code, item_code]
+      );
+
+      if (productCheck.length > 0) {
+        actualProductCode = productCheck[0].item_code;
+      }
+
+      console.log("Original item_code:", item_code, "Actual product_code:", actualProductCode, "locationColumn:", locationColumn);
+
+      const query = `
+        SELECT
+          T1.${locationColumn} AS stock_count,
+          T2.min_qty,
+          T2.item_name
+        FROM product_stock_summary AS T1
+        LEFT JOIN products_list AS T2 ON T1.product_code = T2.item_code
+        WHERE T1.product_code = ?`;
+
+      console.log("Executing query with actualProductCode:", actualProductCode);
+
+      const [summary] = await conn.execute(query, [actualProductCode]);
+
+      console.log("Product stock query result:", summary);
+
+      if (summary.length > 0) {
+        const result = summary[0];
+        stockResults.push({
+          item_code,
+          item_name: result.item_name,
+          stock_count: result.stock_count,
+          min_qty: result.min_qty
+        });
+      } else {
+        stockResults.push({ item_code, item_name: "N/A", stock_count: 0, min_qty: null });
+      }
+    } else {
+      // Case 2: Spares
+      // First, resolve item_code (spare_number) to spare_id
+      let spare_id = item_code;
+      
+      const [spareMatch] = await conn.execute(
+        `SELECT id, spare_number FROM spare_list
+         WHERE CAST(spare_number AS CHAR) = ? OR CAST(id AS CHAR) = ?
+         LIMIT 1`,
+        [String(item_code), String(item_code)],
+      );
+
+      if (spareMatch.length > 0) {
+        spare_id = spareMatch[0].id;
+        allowZeroStock = isSpare1110(item_code, spareMatch[0].spare_number);
+      }
+      
+      const query = `
+        SELECT
+          T1.${locationColumn} AS stock_count,
+          T2.min_qty,
+          T2.item_name
+        FROM stock_summary AS T1
+        LEFT JOIN spare_list AS T2 ON T1.spare_id = T2.id
+        WHERE T1.spare_id = ?`;
+
+      const [summary] = await conn.execute(query, [spare_id]);
+
+      if (summary.length > 0) {
+        const result = summary[0];
+        stockResults.push({
+          item_code,
+          item_name: result.item_name,
+          stock_count: result.stock_count,
+          min_qty: result.min_qty
+        });
+      } else {
+        stockResults.push({ item_code, item_name: "N/A", stock_count: 0, min_qty: null });
+      }
+    }
+
+    if (stockResults.length > 0) {
+      return new Response(
+        JSON.stringify({ stockResults, allowZeroStock }),
+        { status: 200 },
+      );
+    } else {
+      return new Response(
+        JSON.stringify({
+          stockResults: [],
+          allowZeroStock,
+          message: "No stock found for this item.",
+        }),
+        { status: 200 },
+      );
+    }
+  } catch (error) {
+    console.error("API error:", error);
+    return new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 });
+  }
+}

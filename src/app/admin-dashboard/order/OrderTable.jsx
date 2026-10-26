@@ -1,0 +1,4908 @@
+"use client";
+import TypeableDateFilterInput from "@/components/ui/TypeableDateFilterInput";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  FileText,
+  UploadCloud,
+  FileCheck,
+  ClipboardList,
+  Search,
+  CheckCircle,
+  XCircle,
+  MoreVertical,
+  Truck,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  PackageCheck,
+  CreditCard,
+  Clock,
+  Package,
+  Pencil,
+  AlertCircle,
+} from "lucide-react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import dayjs from "dayjs";
+import {
+  buildOrderPaymentRows,
+  getOrderPaidAmountForDisplay,
+  sumOrderPaymentAmounts,
+} from "@/lib/orderPaymentHistory";
+import { OrderPaymentHistoryTrigger } from "@/components/orders/OrderPaymentHistoryModal";
+import {
+  deriveOrderPaymentStatus,
+  deriveOrderListPaymentStatus,
+} from "@/lib/paymentOrderStatus";
+import ExcelJS from "exceljs";
+import {
+  OrderListSearchInput,
+  OrderListSearchApplyButton,
+  OrderListSearchResetButton,
+} from "@/components/orders/OrderListSearchFilterControls";
+import { orderMatchesSearchQuery } from "@/lib/orderListClientSearch";
+import { Pie } from "react-chartjs-2";
+import { Chart as ChartJS, ArcElement, Tooltip, Legend } from "chart.js";
+import {
+  canEditDeliveryProof,
+  hasOrderInvoiceReport,
+} from "@/lib/orderDocumentEditRules";
+import { isBookingAllowedForOrder } from "@/lib/orderBookingEligibility";
+import {
+  canCreateFollowUpBooking,
+  canOpenDispatchForOrder,
+  canViewDispatchPanelForOrder,
+  canShowOrderDeliveryActions,
+  isRemainDispatchRound,
+  orderHasDispatchedStock,
+  orderHasOpenDispatchBatch,
+} from "@/lib/orderDeliveryEligibility";
+import {
+  isOrderFullyDelivered,
+  isOrderPartialDelivery,
+  orderHasDeliveryRecord,
+} from "@/lib/orderDeliveryStatus";
+import {
+  getDeliveryBatchForView,
+  orderHasSecondDeliveryBatch,
+} from "@/lib/orderDeliveryBatches";
+import AccountantReportActionLinks from "@/components/orders/AccountantReportActionLinks";
+import OrderInvoiceMenuLinks from "@/components/orders/OrderInvoiceMenuLinks";
+import ViewCreditNoteMenuLink from "@/components/orders/ViewCreditNoteMenuLink";
+import { ViewReturnBookingMenuItem } from "@/components/orders/ReturnBookingWarehouseMenuItems";
+import AccountantReturnViewMenuItems from "@/components/orders/AccountantReturnViewMenuItems";
+import {
+  canManageAnyOrderDeliveryRole,
+  canViewOrderDeliveryDetailsRole,
+  isAccountantOnlyMenuRole,
+  isSuperAdminRole,
+} from "@/lib/roleKeyUtils";
+import DeleteButton from "@/components/accounts/DeleteButton";
+import DispatchProductSelectModal from "@/components/orders/DispatchProductSelectModal";
+import OrderBookingViewMenuLinks from "@/components/orders/OrderBookingViewMenuLinks";
+import OrderDeliveryMenuLinks from "@/components/orders/OrderDeliveryMenuLinks";
+import toast from "react-hot-toast";
+import LinkedStatementPaymentCell from "@/components/orders/LinkedStatementPaymentCell";
+
+ChartJS.register(ArcElement, Tooltip, Legend);
+
+const LEAD_CAMPAIGN_OPTIONS = [
+  { value: "india_mart", label: "India Mart", color: "rgba(16, 185, 129, 0.85)" },
+  { value: "social_media", label: "Social Media", color: "rgba(236, 72, 153, 0.85)" },
+  { value: "google_ads", label: "Google Ads", color: "rgba(168, 85, 247, 0.85)" },
+  { value: "visit", label: "Visit", color: "rgba(249, 115, 22, 0.85)" },
+  { value: "website_visit", label: "Website Visit", color: "rgba(34, 211, 238, 0.85)" },
+  { value: "reference", label: "Reference", color: "rgba(59, 130, 246, 0.85)" },
+];
+
+function normalizeLeadCampaignKey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function formatLeadCampaignLabel(value) {
+  const key = normalizeLeadCampaignKey(value);
+  if (!key) return "—";
+  const found = LEAD_CAMPAIGN_OPTIONS.find((o) => o.value === key);
+  if (found) return found.label;
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function leadCampaignColor(value) {
+  const key = normalizeLeadCampaignKey(value);
+  if (!key) return "rgba(148, 163, 184, 0.85)";
+  return (
+    LEAD_CAMPAIGN_OPTIONS.find((o) => o.value === key)?.color ||
+    "rgba(100, 116, 139, 0.85)"
+  );
+}
+
+// import {
+//   DispatchPhotosMenuButton,
+//   DispatchPhotosModal,
+// } from "@/components/orders/DispatchPhotosModal";
+
+function parseOrderLineItems(order) {
+  if (Array.isArray(order?.line_items)) return order.line_items;
+  return [];
+}
+
+function normalizeModelCode(code) {
+  return String(code || "").trim().toUpperCase();
+}
+
+function lineItemMatchesModelFilter(item, filterKey) {
+  if (!filterKey) return false;
+  const code = normalizeModelCode(item.item_code);
+  const filterCode = normalizeModelCode(filterKey);
+  if (code && filterCode && code === filterCode) return true;
+  return String(item.item_name || "").trim() === String(filterKey).trim();
+}
+
+function orderMatchesModelFilter(order, filterKey) {
+  if (!filterKey) return true;
+  return parseOrderLineItems(order).some((item) => lineItemMatchesModelFilter(item, filterKey));
+}
+
+function orderMatchesModelFilters(order, filterKeys) {
+  if (!filterKeys?.length) return true;
+  return filterKeys.some((filterKey) =>
+    parseOrderLineItems(order).some((item) => lineItemMatchesModelFilter(item, filterKey)),
+  );
+}
+
+function modelQuantityInOrder(order, filterKey) {
+  if (!filterKey) return 0;
+  return parseOrderLineItems(order)
+    .filter((item) => lineItemMatchesModelFilter(item, filterKey))
+    .reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+}
+
+function modelQuantityInOrders(order, filterKeys) {
+  if (!filterKeys?.length) return 0;
+  return filterKeys.reduce((sum, filterKey) => sum + modelQuantityInOrder(order, filterKey), 0);
+}
+
+function parseModelFiltersFromStorage(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+  } catch {
+    const legacy = String(raw).trim();
+    if (legacy) return [legacy];
+  }
+  return [];
+}
+
+function readOrderTableFilterState() {
+  if (typeof window === "undefined") {
+    return {
+      searchQuery: "",
+      statusFilter: "",
+      dateFrom: "",
+      dateTo: "",
+      createdByFilter: "",
+      leadCampaignFilter: "",
+      modelNameFilters: [],
+      approvalStatusFilter: "",
+      paymentStatusFilter: "",
+    };
+  }
+  const savedModel =
+    localStorage.getItem("orderTable_modelNameFilters") ||
+    localStorage.getItem("orderTable_modelNameFilter");
+  return {
+    searchQuery: localStorage.getItem("orderTable_searchQuery") || "",
+    statusFilter: localStorage.getItem("orderTable_statusFilter") || "",
+    dateFrom: localStorage.getItem("orderTable_dateFrom") ?? "",
+    dateTo: localStorage.getItem("orderTable_dateTo") ?? "",
+    createdByFilter: localStorage.getItem("orderTable_createdByFilter") || "",
+    leadCampaignFilter: localStorage.getItem("orderTable_leadCampaignFilter") || "",
+    modelNameFilters: parseModelFiltersFromStorage(savedModel),
+    approvalStatusFilter: localStorage.getItem("orderTable_approvalStatusFilter") || "",
+    paymentStatusFilter: localStorage.getItem("orderTable_paymentStatusFilter") || "",
+  };
+}
+
+function defaultOrderTableFilterState() {
+  return {
+    searchQuery: "",
+    statusFilter: "",
+    dateFrom: "",
+    dateTo: "",
+    createdByFilter: "",
+    leadCampaignFilter: "",
+    modelNameFilters: [],
+    approvalStatusFilter: "",
+    paymentStatusFilter: "",
+  };
+}
+
+function persistOrderTableFilterState(state) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("orderTable_searchQuery", state.searchQuery);
+  localStorage.setItem("orderTable_statusFilter", state.statusFilter);
+  localStorage.setItem("orderTable_dateFrom", state.dateFrom);
+  localStorage.setItem("orderTable_dateTo", state.dateTo);
+  localStorage.setItem("orderTable_createdByFilter", state.createdByFilter);
+  localStorage.setItem("orderTable_leadCampaignFilter", state.leadCampaignFilter);
+  localStorage.setItem("orderTable_modelNameFilters", JSON.stringify(state.modelNameFilters));
+  localStorage.setItem("orderTable_approvalStatusFilter", state.approvalStatusFilter);
+  localStorage.setItem("orderTable_paymentStatusFilter", state.paymentStatusFilter);
+}
+
+function formatModelOptionLabel(item) {
+  const code = String(item?.item_code || "").trim();
+  const name = String(item?.item_name || "").trim();
+  if (code && name) return `${code} (${name})`;
+  return name || code || "";
+}
+
+function resolveItemType(codeKey, catalogByCode, spareCatalogByCode) {
+  if (catalogByCode.has(codeKey)) return "product";
+  if (spareCatalogByCode.has(codeKey)) return "spare";
+  return /[a-zA-Z]/.test(codeKey) ? "product" : "spare";
+}
+
+function sortModelOptions(options) {
+  return [...options].sort((a, b) => {
+    const typeOrder = (type) => (type === "product" ? 0 : 1);
+    const typeDiff = typeOrder(a.itemType) - typeOrder(b.itemType);
+    if (typeDiff !== 0) return typeDiff;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+  });
+}
+
+function buildModelOptions(orders, catalogByCode, spareCatalogByCode) {
+  const map = new Map();
+
+  orders?.forEach((order) => {
+    parseOrderLineItems(order).forEach((item) => {
+      const code = String(item.item_code || "").trim();
+      const codeKey = normalizeModelCode(code);
+      const orderName = String(item.item_name || "").trim();
+
+      if (codeKey) {
+        const catalogName = String(catalogByCode.get(codeKey)?.item_name || "").trim();
+        const spareName = String(spareCatalogByCode.get(codeKey)?.item_name || "").trim();
+        const name = catalogName || spareName || orderName;
+        if (!name) return;
+        map.set(codeKey, {
+          filterKey: codeKey,
+          item_code: code,
+          item_name: name,
+          itemType: resolveItemType(codeKey, catalogByCode, spareCatalogByCode),
+          label: formatModelOptionLabel({ item_code: code, item_name: name }),
+        });
+        return;
+      }
+
+      if (!orderName) return;
+      const nameKey = `name:${orderName.toLowerCase()}`;
+      if (!map.has(nameKey)) {
+        map.set(nameKey, {
+          filterKey: orderName,
+          item_code: "",
+          item_name: orderName,
+          itemType: /[a-zA-Z]/.test(orderName) ? "product" : "spare",
+          label: orderName,
+        });
+      }
+    });
+  });
+
+  return sortModelOptions([...map.values()]);
+}
+
+function findModelOption(filterKey, modelOptions) {
+  if (!filterKey) return null;
+  const codeKey = normalizeModelCode(filterKey);
+  return (
+    modelOptions.find((opt) => opt.filterKey === filterKey) ||
+    modelOptions.find((opt) => normalizeModelCode(opt.filterKey) === codeKey) ||
+    modelOptions.find((opt) => opt.item_name === filterKey) ||
+    modelOptions.find((opt) => normalizeModelCode(opt.item_code) === codeKey) ||
+    null
+  );
+}
+
+function getModelLabel(filterKey, modelOptions) {
+  if (!filterKey) return "";
+  return findModelOption(filterKey, modelOptions)?.label || filterKey;
+}
+
+function isSameModelFilter(filterKey, opt) {
+  if (!filterKey || !opt) return false;
+  return (
+    filterKey === opt.filterKey ||
+    normalizeModelCode(filterKey) === normalizeModelCode(opt.filterKey) ||
+    filterKey === opt.item_name
+  );
+}
+
+function isModelFilterSelected(filterKeys, opt) {
+  if (!filterKeys?.length || !opt) return false;
+  return filterKeys.some((filterKey) => isSameModelFilter(filterKey, opt));
+}
+
+function normalizeModelFilterKeys(filterKeys, modelOptions) {
+  if (!filterKeys?.length || !modelOptions?.length) return filterKeys || [];
+  return [...new Set(
+    filterKeys.map((filterKey) => findModelOption(filterKey, modelOptions)?.filterKey || filterKey),
+  )];
+}
+
+// 👻 A sleek skeleton loader for a modern feel
+const SkeletonLoader = () => (
+  <div className="animate-pulse space-y-4">
+    {/* Search bar and filter skeleton */}
+    <div className="h-10 bg-gray-200 rounded-lg w-full mb-6"></div>
+
+    {/* Desktop table skeleton */}
+    <div className="hidden lg:block overflow-x-auto">
+      <div className="bg-gray-200 h-12 rounded-t-lg"></div>
+      <div className="border border-gray-200 rounded-b-lg p-4 space-y-2">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="h-10 bg-gray-200 rounded-lg"></div>
+        ))}
+      </div>
+    </div>
+
+    {/* Mobile card skeleton */}
+    <div className="lg:hidden space-y-4">
+      {[...Array(3)].map((_, i) => (
+        <div
+          key={i}
+          className="bg-gray-100 border rounded-xl shadow-sm p-4 space-y-2"
+        >
+          <div className="h-6 bg-gray-200 w-3/4 rounded"></div>
+          <div className="h-4 bg-gray-200 w-1/2 rounded"></div>
+          <div className="h-4 bg-gray-200 w-2/3 rounded"></div>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+function isOrderPaid(order) {
+  return (
+    (order.payment_status || "")
+      .toString()
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "") === "paid"
+  );
+}
+
+function normalizeApprovalStatus(status) {
+  const s = (status ?? "").toString().trim().toLowerCase();
+  if (!s || s === "null" || s === "undefined") return "pending";
+  return s;
+}
+
+function getApprovalRemarkText(order) {
+  const raw = order?.approval_remark;
+  if (raw == null) return "";
+  return String(raw).trim();
+}
+
+function ApprovalRemarkHover({ remark }) {
+  const text = String(remark || "").trim();
+  if (!text) return null;
+  return (
+    <span
+      className="inline-flex items-center justify-center text-amber-600 cursor-help shrink-0"
+      title={text}
+      aria-label={`Approval remark: ${text}`}
+    >
+      <AlertCircle size={14} />
+    </span>
+  );
+}
+
+/** Cancelled and rejected orders are excluded from dashboard stat cards. */
+function isOrderExcludedFromStatCards(order) {
+  if (order.is_cancelled) return true;
+  return (order.approval_status || "").toString().trim().toLowerCase() === "rejected";
+}
+
+/** neworder.dispatch_status: 1 = dispatched, anything else = not dispatched. */
+function isOrderDispatchedForStats(order) {
+  return Number(order.dispatch_status) === 1;
+}
+
+function isOrderPendingDispatchForStats(order) {
+  return Number(order.dispatch_status) !== 1;
+}
+
+/** Matches UI status "Dispatch Done" (same rules as getStatusText). */
+function isDisplayedDispatchDone(order) {
+  if (order.approval_status === "pending") return false;
+  if (order.approval_status === "rejected") return false;
+  if (order.is_returned === 1) return false;
+  if (order.is_returned === 2) return false;
+  if (order.is_returned === 3) return false;
+  if (order.is_cancelled || order.approval_status === "rejected") return false;
+  if (order.installation_status) return false;
+  if (order.delivery_status) return false;
+  return Number(order.dispatch_status) === 1;
+}
+
+function amountWithoutGst(order) {
+  const rawBase = order.baseAmount;
+  if (rawBase != null && rawBase !== "") {
+    const base = Number(rawBase);
+    if (Number.isFinite(base)) return base;
+  }
+  const total = Number(order.totalamt) || 0;
+  const tax = Number(order.taxamt) || 0;
+  return Math.max(0, total - tax);
+}
+
+/** Calculate total paid amount (booking CSV + invoice-linked snapshot). */
+function getTotalPaidAmount(order) {
+  return getOrderPaidAmountForDisplay(order);
+}
+
+/** Stat cards / totals: only accountant order-report payment (not grey booking advance). */
+function getAccountantReportPaidAmount(order) {
+  if (!hasOrderInvoiceReport(order)) return 0;
+  return sumOrderPaymentAmounts(order);
+}
+
+/** Booking advance before accountant invoice report — grey; after report — green. */
+function getOrderPaidAmountUiClasses(order) {
+  const advanceOnly = !hasOrderInvoiceReport(order);
+  if (advanceOnly) {
+    return {
+      label: "font-semibold text-gray-500",
+      value:
+        "font-bold text-gray-500 underline decoration-gray-400 underline-offset-2 hover:text-gray-700",
+    };
+  }
+  return {
+    label: "font-semibold text-green-700",
+    value:
+      "font-bold text-green-600 underline decoration-green-400 underline-offset-2 hover:text-green-800",
+  };
+}
+
+/** Calculate total amount - use quotation grand_total as primary source */
+function getTotalAmount(order) {
+  // First priority: quotation grand_total (from quotations_records)
+  const quotationTotal = Number(order.quotation_grand_total) || 0;
+  if (quotationTotal > 0) return quotationTotal;
+  
+  // Second priority: order totalamt
+  const total = Number(order.totalamt) || 0;
+  if (total > 0) return total;
+  
+  // Fallback: use baseAmount + taxamt if both are 0
+  const base = Number(order.baseAmount) || 0;
+  const tax = Number(order.taxamt) || 0;
+  return Math.max(total, base + tax);
+}
+
+/** Calculate balance amount (total - paid) */
+function getBalanceAmount(order) {
+  const total = getTotalAmount(order);
+  const paid = getTotalPaidAmount(order);
+  return Math.max(0, total - paid);
+}
+
+/** Sum of quotation line taxable (same as invoice “Taxable” column); fallback base/total−tax. */
+function orderTaxableTotal(order) {
+  const t = order.order_taxable_total;
+  if (t != null && t !== "") {
+    const n = Number(t);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return amountWithoutGst(order);
+}
+
+/** Get taxable amount for Payment column - use quotation subtotal as primary (₹40,000) */
+function getPaymentColumnAmount(order) {
+  // First priority: quotation subtotal (taxable amount without GST)
+  const quotationSubtotal = Number(order.quotation_subtotal) || 0;
+  if (quotationSubtotal > 0) return quotationSubtotal;
+  
+  // Second priority: use orderTaxableTotal (from quotation items sum)
+  return orderTaxableTotal(order);
+}
+
+/** Same rules as table filter: `created_at` within optional From/To (order date). */
+function orderCreatedInDateRange(order, dateFrom, dateTo) {
+  if (!dateFrom && !dateTo) return true;
+  const created = order.created_at ? new Date(order.created_at) : null;
+  if (!created || isNaN(created.getTime())) return false;
+  if (dateFrom) {
+    const from = new Date(dateFrom + "T00:00:00");
+    if (created < from) return false;
+  }
+  if (dateTo) {
+    const to = new Date(dateTo + "T23:59:59");
+    if (created > to) return false;
+  }
+  return true;
+}
+
+function getStatusText(order) {
+  if (order.approval_status === "pending") {
+    return {
+      text: "Pending Approval",
+      bg: "bg-orange-100",
+      textCol: "text-orange-800",
+      icon: <MoreVertical size={14} className="mr-1" />,
+    };
+  }
+  if (order.approval_status === "rejected") {
+    return {
+      text: "Rejected",
+      bg: "bg-red-100",
+      textCol: "text-red-800",
+      icon: <XCircle size={14} className="mr-1" />,
+    };
+  }
+  if (Number(order.is_returned) === 3) {
+    if (Number(order.return_booking_done) === 1) {
+      return {
+        text: "Return Booking Done",
+        bg: "bg-indigo-100",
+        textCol: "text-indigo-800",
+        icon: <ArrowUp size={14} className="mr-1" />,
+      };
+    }
+    return {
+      text: "Return Initiated",
+      bg: "bg-purple-100",
+      textCol: "text-purple-800",
+      icon: <ArrowUp size={14} className="mr-1" />,
+    };
+  }
+  if (Number(order.is_returned) === 1) {
+    if (Number(order.warehouse_in_done) === 1) {
+      return {
+        text: "Return Completed",
+        bg: "bg-orange-100",
+        textCol: "text-orange-800",
+        icon: <CheckCircle size={14} className="mr-1" />,
+      };
+    }
+    return {
+      text: "Fully Returned",
+      bg: "bg-red-100",
+      textCol: "text-red-800",
+      icon: <XCircle size={14} className="mr-1" />,
+    };
+  }
+  if (Number(order.is_returned) === 2) {
+    return {
+      text: "Partially Returned",
+      bg: "bg-orange-100",
+      textCol: "text-orange-800",
+      icon: <XCircle size={14} className="mr-1" />,
+    };
+  }
+  if (order.is_cancelled || order.approval_status === "rejected") {
+    return {
+      text: "Canceled",
+      bg: "bg-red-100",
+      textCol: "text-red-800",
+      icon: <XCircle size={14} className="mr-1" />,
+    };
+  }
+  if (order.installation_status) {
+    return {
+      text: "Installed",
+      bg: "bg-green-100",
+      textCol: "text-green-800",
+      icon: <CheckCircle size={14} className="mr-1" />,
+    };
+  }
+  if (isOrderFullyDelivered(order)) {
+    return {
+      text: "Delivered",
+      bg: "bg-orange-100",
+      textCol: "text-orange-800",
+      icon: <Truck size={14} className="mr-1" />,
+    };
+  }
+  if (isOrderPartialDelivery(order)) {
+    return {
+      text: "Partial Delivery",
+      bg: "bg-sky-100",
+      textCol: "text-sky-900",
+      icon: <Truck size={14} className="mr-1" />,
+    };
+  }
+  if (Number(order.dispatch_status) === 2) {
+    return {
+      text: "Partial Dispatch",
+      bg: "bg-amber-100",
+      textCol: "text-amber-900",
+      icon: <Truck size={14} className="mr-1" />,
+    };
+  }
+  if (Number(order.dispatch_status) === 1) {
+    return {
+      text: "Dispatch Done",
+      bg: "bg-violet-100",
+      textCol: "text-violet-800",
+      icon: <FileText size={14} className="mr-1" />,
+    };
+  }
+  if (order.booking_id) {
+    return {
+      text: "Booking Done",
+      bg: "bg-green-100",
+      textCol: "text-green-800",
+      icon: <FileCheck size={14} className="mr-1" />,
+    };
+  }
+  if (order.report_file) {
+    return {
+      text: "Invoice Uploaded",
+      bg: "bg-blue-100",
+      textCol: "text-blue-800",
+      icon: <FileText size={14} className="mr-1" />,
+    };
+  }
+  return {
+    text: "Pending Invoice",
+    bg: "bg-yellow-100",
+    textCol: "text-yellow-800",
+    icon: <UploadCloud size={14} className="mr-1" />,
+  };
+}
+
+function orderMatchesListFilters(order, filters, options = {}) {
+  const {
+    appliedSearchQuery = "",
+    appliedStatusFilter = "",
+    appliedDateFrom = "",
+    appliedDateTo = "",
+    appliedCreatedByFilter = "",
+    appliedLeadCampaignFilter = "",
+    appliedApprovalStatusFilter = "",
+    appliedPaymentStatusFilter = "",
+    appliedModelNameFilters = [],
+  } = filters;
+  const { omitCreatedBy = false } = options;
+
+  const approval = normalizeApprovalStatus(order.approval_status);
+  const approvalFilter = appliedApprovalStatusFilter
+    .toString()
+    .trim()
+    .toLowerCase();
+
+  if (approvalFilter) {
+    if (approval !== approvalFilter) return false;
+  } else if (approval === "rejected") {
+    return false;
+  }
+
+  if (appliedStatusFilter) {
+    const orderStatus = getStatusText(order)
+      .text.toLowerCase()
+      .replace(/\s+/g, "");
+    if (appliedStatusFilter === "pendingdispatched") {
+      if (Number(order.dispatch_status) === 1) return false;
+    } else if (appliedStatusFilter === "dispatchdone") {
+      if (Number(order.dispatch_status) !== 1) return false;
+    } else if (orderStatus !== appliedStatusFilter.toLowerCase()) {
+      return false;
+    }
+  }
+
+  if (!orderCreatedInDateRange(order, appliedDateFrom, appliedDateTo)) return false;
+
+  if (
+    !omitCreatedBy &&
+    appliedCreatedByFilter &&
+    order.created_by !== appliedCreatedByFilter
+  ) {
+    return false;
+  }
+
+  if (appliedLeadCampaignFilter) {
+    const campaignKey = normalizeLeadCampaignKey(order.lead_campaign);
+    if (appliedLeadCampaignFilter === "__none__") {
+      if (campaignKey) return false;
+    } else if (campaignKey !== appliedLeadCampaignFilter) {
+      return false;
+    }
+  }
+
+  if (appliedPaymentStatusFilter === "paid" && !isOrderPaid(order)) {
+    return false;
+  }
+  if (appliedPaymentStatusFilter === "unpaid" && isOrderPaid(order)) {
+    return false;
+  }
+  if (appliedPaymentStatusFilter === "unpaid" && order.is_cancelled) {
+    return false;
+  }
+
+  if (!orderMatchesModelFilters(order, appliedModelNameFilters)) {
+    return false;
+  }
+
+  const lowercasedQuery = appliedSearchQuery.toLowerCase();
+  if (lowercasedQuery) {
+    const matchesSearch =
+      order.order_id?.toLowerCase().includes(lowercasedQuery) ||
+      order.client_name?.toLowerCase().includes(lowercasedQuery) ||
+      order.company_name?.toLowerCase().includes(lowercasedQuery) ||
+      order.contact?.toLowerCase().includes(lowercasedQuery) ||
+      order.state?.toLowerCase().includes(lowercasedQuery) ||
+      formatLeadCampaignLabel(order.lead_campaign)
+        .toLowerCase()
+        .includes(lowercasedQuery) ||
+      normalizeLeadCampaignKey(order.lead_campaign).includes(lowercasedQuery);
+    if (!matchesSearch) return false;
+  }
+
+  return true;
+}
+
+const PAGE_SIZE = 40;
+const SCROLL_LOAD_OFFSET_PX = 200;
+
+export default function OrderTable({
+  userRole,
+  serviceSupportOnly = false,
+  orders: ordersProp,
+}) {
+  const clientFetch = ordersProp === undefined;
+  const [orders, setOrders] = useState(ordersProp ?? []);
+  const [listLoading, setListLoading] = useState(clientFetch);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [scrollLoadEnabled, setScrollLoadEnabled] = useState(false);
+  const [fetchError, setFetchError] = useState(null);
+  const pageRef = useRef(1);
+  const fetchAbortRef = useRef(null);
+  const tableScrollRef = useRef(null);
+
+  const [productCatalog, setProductCatalog] = useState([]);
+  const [spareCatalog, setSpareCatalog] = useState([]);
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
+  const [searchQuery, setSearchQuery] = useState(
+    () => readOrderTableFilterState().searchQuery,
+  );
+  const [appliedSearchQuery, setAppliedSearchQuery] = useState(
+    () => readOrderTableFilterState().searchQuery,
+  );
+  const [statusFilter, setStatusFilter] = useState(
+    () => readOrderTableFilterState().statusFilter,
+  );
+  const [appliedStatusFilter, setAppliedStatusFilter] = useState(
+    () => readOrderTableFilterState().statusFilter,
+  );
+  const [dateFrom, setDateFrom] = useState(() => readOrderTableFilterState().dateFrom);
+  const [appliedDateFrom, setAppliedDateFrom] = useState(
+    () => readOrderTableFilterState().dateFrom,
+  );
+  const [dateTo, setDateTo] = useState(() => readOrderTableFilterState().dateTo);
+  const [appliedDateTo, setAppliedDateTo] = useState(
+    () => readOrderTableFilterState().dateTo,
+  );
+  const [createdByFilter, setCreatedByFilter] = useState(
+    () => readOrderTableFilterState().createdByFilter,
+  );
+  const [appliedCreatedByFilter, setAppliedCreatedByFilter] = useState(
+    () => readOrderTableFilterState().createdByFilter,
+  );
+  const [leadCampaignFilter, setLeadCampaignFilter] = useState(
+    () => readOrderTableFilterState().leadCampaignFilter,
+  );
+  const [appliedLeadCampaignFilter, setAppliedLeadCampaignFilter] = useState(
+    () => readOrderTableFilterState().leadCampaignFilter,
+  );
+  const [modelNameFilters, setModelNameFilters] = useState(
+    () => readOrderTableFilterState().modelNameFilters,
+  );
+  const [appliedModelNameFilters, setAppliedModelNameFilters] = useState(
+    () => readOrderTableFilterState().modelNameFilters,
+  );
+  const [modelSearchText, setModelSearchText] = useState("");
+  const [showModelDropdown, setShowModelDropdown] = useState(false);
+  const modelSearchRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [productsRes, sparesRes] = await Promise.all([
+          fetch("/api/products/list", { cache: "no-store" }),
+          fetch("/api/spare/list", { cache: "no-store" }),
+        ]);
+        if (!cancelled && productsRes.ok) {
+          const data = await productsRes.json();
+          if (Array.isArray(data)) setProductCatalog(data);
+        }
+        if (!cancelled && sparesRes.ok) {
+          const data = await sparesRes.json();
+          if (Array.isArray(data)) setSpareCatalog(data);
+        }
+      } catch {
+        /* non-fatal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const [openMenuId, setOpenMenuId] = useState(null); // State to track which menu is open
+  // const canShowInstall = ["SUPERADMIN"].includes(userRole);
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState(
+    () => readOrderTableFilterState().approvalStatusFilter,
+  );
+  const [appliedApprovalStatusFilter, setAppliedApprovalStatusFilter] = useState(
+    () => readOrderTableFilterState().approvalStatusFilter,
+  );
+  const [paymentStatusFilter, setPaymentStatusFilter] = useState(
+    () => readOrderTableFilterState().paymentStatusFilter,
+  );
+  const [appliedPaymentStatusFilter, setAppliedPaymentStatusFilter] = useState(
+    () => readOrderTableFilterState().paymentStatusFilter,
+  );
+  const [showNukePanel, setShowNukePanel] = useState(false);
+  const [nukeConfirmText, setNukeConfirmText] = useState("");
+  const [nukeLoading, setNukeLoading] = useState(false);
+  const [nukeStep, setNukeStep] = useState(1); // 1=confirm dialog, 2=type confirm
+  const [taxableClickCount, setTaxableClickCount] = useState(0);
+  const [isExporting, setIsExporting] = useState(false);
+  // Sorting state
+  const [sortColumn, setSortColumn] = useState("created_at");
+  const [sortDirection, setSortDirection] = useState("desc");
+
+  useEffect(() => {
+    const status = searchParams.get("status");
+    const from = searchParams.get("dateFrom");
+    const to = searchParams.get("dateTo");
+    if (!status && !from && !to) return;
+    if (status) {
+      setStatusFilter(status);
+      setAppliedStatusFilter(status);
+    }
+    if (from) {
+      setDateFrom(from);
+      setAppliedDateFrom(from);
+    }
+    if (to) {
+      setDateTo(to);
+      setAppliedDateTo(to);
+    }
+  }, [searchParams]);
+
+  const fetchOrdersPage = useCallback(
+    async ({ page = 1, append = false, filters } = {}) => {
+      const f = filters || {
+        search: appliedSearchQuery,
+        dateFrom: appliedDateFrom,
+        dateTo: appliedDateTo,
+        createdBy: appliedCreatedByFilter,
+        leadCampaign: appliedLeadCampaignFilter,
+        approvalStatus: appliedApprovalStatusFilter,
+      };
+
+      if (append) {
+        setLoadingMore(true);
+      } else {
+        setListLoading(true);
+        setFetchError(null);
+      }
+
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("limit", String(PAGE_SIZE));
+      if (serviceSupportOnly) params.set("serviceSupport", "1");
+      if (f.search) params.set("search", f.search);
+      if (f.dateFrom) params.set("dateFrom", f.dateFrom);
+      if (f.dateTo) params.set("dateTo", f.dateTo);
+      if (f.createdBy) params.set("createdBy", f.createdBy);
+      if (f.leadCampaign) params.set("leadCampaign", f.leadCampaign);
+      if (f.approvalStatus) params.set("approvalStatus", f.approvalStatus);
+
+      try {
+        if (!append && fetchAbortRef.current) {
+          fetchAbortRef.current.abort();
+        }
+        const controller = new AbortController();
+        if (!append) fetchAbortRef.current = controller;
+
+        const res = await fetch(`/api/admin/orders/list?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        const json = await res.json();
+        if (!res.ok || !json.success) {
+          throw new Error(json.detail || json.error || "Failed to load orders");
+        }
+
+        const rows = json.data || [];
+        setOrders((prev) => {
+          if (!append) return rows;
+          const seen = new Set(prev.map((o) => o.order_id));
+          const merged = [...prev];
+          for (const row of rows) {
+            if (!seen.has(row.order_id)) {
+              seen.add(row.order_id);
+              merged.push(row);
+            }
+          }
+          return merged;
+        });
+        pageRef.current = page;
+        setHasMore(Boolean(json.meta?.hasMore));
+      } catch (err) {
+        if (err?.name === "AbortError") return;
+        console.error("Admin order list fetch failed:", err);
+        if (!append) {
+          setOrders([]);
+          setFetchError(err?.message || "Failed to load orders");
+        }
+      } finally {
+        if (fetchAbortRef.current?.signal.aborted && !append) return;
+        if (append) {
+          setLoadingMore(false);
+        } else {
+          setListLoading(false);
+          setScrollLoadEnabled(true);
+        }
+      }
+    },
+    [
+      appliedSearchQuery,
+      appliedDateFrom,
+      appliedDateTo,
+      appliedCreatedByFilter,
+      appliedLeadCampaignFilter,
+      appliedApprovalStatusFilter,
+      serviceSupportOnly,
+    ],
+  );
+
+  const loadMoreOrders = useCallback(() => {
+    if (listLoading || loadingMore || !hasMore) return;
+    fetchOrdersPage({ page: pageRef.current + 1, append: true });
+  }, [listLoading, loadingMore, hasMore, fetchOrdersPage]);
+
+  const handleApplySearch = useCallback(() => {
+    setAppliedSearchQuery(searchQuery);
+    setAppliedStatusFilter(statusFilter);
+    setAppliedDateFrom(dateFrom);
+    setAppliedDateTo(dateTo);
+    setAppliedCreatedByFilter(createdByFilter);
+    setAppliedLeadCampaignFilter(leadCampaignFilter);
+    setAppliedModelNameFilters(modelNameFilters);
+    setAppliedApprovalStatusFilter(approvalStatusFilter);
+    setAppliedPaymentStatusFilter(paymentStatusFilter);
+    persistOrderTableFilterState({
+      searchQuery,
+      statusFilter,
+      dateFrom,
+      dateTo,
+      createdByFilter,
+      leadCampaignFilter,
+      modelNameFilters,
+      approvalStatusFilter,
+      paymentStatusFilter,
+    });
+    pageRef.current = 1;
+    setHasMore(true);
+    setScrollLoadEnabled(false);
+    if (clientFetch) {
+      fetchOrdersPage({
+        page: 1,
+        append: false,
+        filters: {
+          search: searchQuery,
+          dateFrom,
+          dateTo,
+          createdBy: createdByFilter,
+          leadCampaign: leadCampaignFilter,
+          approvalStatus: approvalStatusFilter,
+        },
+      });
+    }
+  }, [
+    searchQuery,
+    statusFilter,
+    dateFrom,
+    dateTo,
+    createdByFilter,
+    leadCampaignFilter,
+    modelNameFilters,
+    approvalStatusFilter,
+    paymentStatusFilter,
+    fetchOrdersPage,
+    clientFetch,
+  ]);
+
+  useEffect(() => {
+    if (!clientFetch) return;
+    fetchOrdersPage({ page: 1, append: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceSupportOnly, clientFetch]);
+
+  useEffect(() => {
+    if (!clientFetch || !scrollLoadEnabled) return;
+
+    const onScroll = (el) => {
+      if (listLoading || loadingMore || !hasMore) return;
+      const nearBottom =
+        el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_OFFSET_PX;
+      if (nearBottom) loadMoreOrders();
+    };
+
+    const tableEl = tableScrollRef.current;
+    const mainEl = document.querySelector("main.overflow-auto");
+    const onTableScroll = () => tableEl && onScroll(tableEl);
+    const onMainScroll = () => mainEl && onScroll(mainEl);
+
+    tableEl?.addEventListener("scroll", onTableScroll, { passive: true });
+    mainEl?.addEventListener("scroll", onMainScroll, { passive: true });
+
+    return () => {
+      tableEl?.removeEventListener("scroll", onTableScroll);
+      mainEl?.removeEventListener("scroll", onMainScroll);
+    };
+  }, [clientFetch, scrollLoadEnabled, loadMoreOrders, hasMore, listLoading, loadingMore]);
+
+  useEffect(() => {
+    if (!clientFetch && ordersProp) {
+      setOrders(ordersProp);
+    }
+  }, [clientFetch, ordersProp]);
+
+  const handleResetFilters = useCallback(() => {
+    const defaults = defaultOrderTableFilterState();
+    setSearchQuery(defaults.searchQuery);
+    setAppliedSearchQuery(defaults.searchQuery);
+    setStatusFilter(defaults.statusFilter);
+    setAppliedStatusFilter(defaults.statusFilter);
+    setDateFrom(defaults.dateFrom);
+    setAppliedDateFrom(defaults.dateFrom);
+    setDateTo(defaults.dateTo);
+    setAppliedDateTo(defaults.dateTo);
+    setCreatedByFilter(defaults.createdByFilter);
+    setAppliedCreatedByFilter(defaults.createdByFilter);
+    setLeadCampaignFilter(defaults.leadCampaignFilter);
+    setAppliedLeadCampaignFilter(defaults.leadCampaignFilter);
+    setModelNameFilters(defaults.modelNameFilters);
+    setAppliedModelNameFilters(defaults.modelNameFilters);
+    setApprovalStatusFilter(defaults.approvalStatusFilter);
+    setAppliedApprovalStatusFilter(defaults.approvalStatusFilter);
+    setPaymentStatusFilter(defaults.paymentStatusFilter);
+    setAppliedPaymentStatusFilter(defaults.paymentStatusFilter);
+    setModelSearchText("");
+    setShowModelDropdown(false);
+    persistOrderTableFilterState(defaults);
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("orderTable_modelNameFilter");
+    }
+    router.replace("/admin-dashboard/order", { scroll: false });
+    pageRef.current = 1;
+    setHasMore(true);
+    setScrollLoadEnabled(false);
+    if (clientFetch) {
+      fetchOrdersPage({ page: 1, append: false, filters: defaults });
+    }
+  }, [router, fetchOrdersPage, clientFetch]);
+
+  const toggleMenu = (id) => {
+    setOpenMenuId(openMenuId === id ? null : id);
+  };
+
+  // Sorting handler
+  const handleSort = (column) => {
+    if (sortColumn === column) {
+      // Toggle direction if same column
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      // Set new column and default to ascending
+      setSortColumn(column);
+      setSortDirection("asc");
+    }
+  };
+
+  // Get value for sorting based on column
+  const getSortValue = (order, column) => {
+    switch (column) {
+      case "order_id":
+        return order.order_id?.toString().toLowerCase() || "";
+      case "created_by":
+        return order.created_by?.toString().toLowerCase() || "";
+      case "created_at":
+        return order.created_at ? new Date(order.created_at).getTime() : 0;
+      case "client_name":
+        return order.client_name?.toString().toLowerCase() || "";
+      case "company_name":
+        return order.company_name?.toString().toLowerCase() || "";
+      case "lead_campaign":
+        return normalizeLeadCampaignKey(order.lead_campaign);
+      case "state":
+        return order.state?.toString().toLowerCase() || "";
+      case "item_name":
+        return order.item_name?.toString().toLowerCase() || "";
+      case "status":
+        return getStatusText(order).text.toLowerCase();
+      case "payment_status":
+        return order.payment_status?.toString().toLowerCase() || "";
+      case "taxable_amount":
+        return getPaymentColumnAmount(order);
+      case "totalamt":
+        return Number(order.totalamt) || 0;
+      case "paid_amount":
+        return getTotalPaidAmount(order);
+      case "balance_amount":
+        return getBalanceAmount(order);
+      case "approval_status":
+        return order.approval_status?.toString().toLowerCase() || "";
+      case "duedate":
+        return order.duedate ? new Date(order.duedate).getTime() : 0;
+      default:
+        return "";
+    }
+  };
+
+  const toggleModelFilter = useCallback((opt) => {
+    setModelNameFilters((prev) => {
+      if (isModelFilterSelected(prev, opt)) {
+        return prev.filter((filterKey) => !isSameModelFilter(filterKey, opt));
+      }
+      return [...prev, opt.filterKey];
+    });
+  }, []);
+
+  const removeModelFilter = useCallback((filterKey) => {
+    setModelNameFilters((prev) =>
+      prev.filter((selectedKey) => !isSameModelFilter(selectedKey, { filterKey, item_name: filterKey })),
+    );
+  }, []);
+
+  const handleStatCardClick = useCallback(
+    (type) => {
+      let nextStatus = statusFilter;
+      let nextApproval = approvalStatusFilter;
+      let nextPayment = paymentStatusFilter;
+
+      switch (type) {
+        case "total":
+          nextStatus = "";
+          nextApproval = "";
+          nextPayment = "";
+          break;
+        case "approved":
+          nextStatus = "";
+          nextApproval = "approved";
+          nextPayment = "";
+          break;
+        case "pending":
+          nextStatus = "";
+          nextApproval = "pending";
+          nextPayment = "";
+          break;
+        case "rejected":
+          nextStatus = "";
+          nextApproval = "rejected";
+          nextPayment = "";
+          break;
+        case "dispatched":
+          nextStatus = "dispatchdone";
+          nextApproval = "approved";
+          nextPayment = "";
+          break;
+        case "pendingDispatch":
+          nextStatus = "pendingdispatched";
+          nextApproval = "approved";
+          nextPayment = "";
+          break;
+        case "paid":
+          nextStatus = "";
+          nextApproval = "";
+          nextPayment = "paid";
+          break;
+        case "unpaid":
+          nextStatus = "";
+          nextApproval = "";
+          nextPayment = "unpaid";
+          break;
+        default:
+          return;
+      }
+
+      setStatusFilter(nextStatus);
+      setApprovalStatusFilter(nextApproval);
+      setPaymentStatusFilter(nextPayment);
+      setAppliedStatusFilter(nextStatus);
+      setAppliedApprovalStatusFilter(nextApproval);
+      setAppliedPaymentStatusFilter(nextPayment);
+      persistOrderTableFilterState({
+        searchQuery,
+        statusFilter: nextStatus,
+        dateFrom,
+        dateTo,
+        createdByFilter,
+        leadCampaignFilter,
+        modelNameFilters,
+        approvalStatusFilter: nextApproval,
+        paymentStatusFilter: nextPayment,
+      });
+    },
+    [
+      statusFilter,
+      approvalStatusFilter,
+      paymentStatusFilter,
+      searchQuery,
+      dateFrom,
+      dateTo,
+      createdByFilter,
+      leadCampaignFilter,
+      modelNameFilters,
+    ],
+  );
+
+  const handleExportToExcel = async () => {
+    setIsExporting(true);
+    try {
+      if (filteredOrders.length === 0) {
+        alert("No data to export");
+        return;
+      }
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Orders");
+
+      // Define columns
+      worksheet.columns = [
+        { header: "Order ID", key: "order_id", width: 15 },
+        { header: "Quotation Number", key: "quote_number", width: 20 },
+        { header: "Invoice Number", key: "invoice_number", width: 20 },
+        { header: "Linked Payment Date", key: "payment_received_date", width: 18 },
+        { header: "Amount Received (Linked)", key: "amount_received", width: 20 },
+        { header: "Client Name", key: "client_name", width: 25 },
+        { header: "Company Name", key: "company_name", width: 30 },
+        { header: "Contact", key: "contact", width: 15 },
+        { header: "State", key: "state", width: 15 },
+        { header: "Item Name", key: "item_name", width: 30 },
+        { header: "Item Code", key: "item_code", width: 20 },
+        { header: "Created By", key: "created_by", width: 15 },
+        { header: "Lead Campaign", key: "lead_campaign", width: 18 },
+        { header: "Created At", key: "created_at", width: 20 },
+        { header: "Due Date", key: "duedate", width: 15 },
+        { header: "Payment Status", key: "payment_status", width: 15 },
+        { header: "Approval Status", key: "approval_status", width: 15 },
+        { header: "Taxable Amount", key: "baseAmount", width: 15 },
+        { header: "Tax Amount", key: "taxamt", width: 15 },
+        { header: "Total Amount", key: "total_amount", width: 16 },
+        { header: "Paid Amount", key: "paid_amount", width: 16 },
+        { header: "Balance Amount", key: "balance_amount", width: 16 },
+      ];
+
+      // Style the header row
+      worksheet.getRow(1).font = { bold: true, size: 12 };
+      worksheet.getRow(1).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE0E0E0" },
+      };
+
+      // Add data rows
+      filteredOrders.forEach((order) => {
+        const totalAmt = getTotalAmount(order);
+        const paidAmt = getTotalPaidAmount(order);
+        const balanceAmt = getBalanceAmount(order);
+
+        worksheet.addRow({
+          order_id: order.order_id,
+          quote_number: order.quote_number || "",
+          invoice_number: order.invoice_number || "",
+          payment_received_date: order.payment_received_date
+            ? dayjs(order.payment_received_date).format("DD-MM-YYYY")
+            : "",
+          amount_received: Number(order.amount_received || 0),
+          client_name: order.client_name || "",
+          company_name: order.company_name || "",
+          contact: order.contact || "",
+          state: order.state || "",
+          item_name: order.item_name || "",
+          item_code: order.item_code || "",
+          created_by: order.created_by || "",
+          lead_campaign: formatLeadCampaignLabel(order.lead_campaign),
+          created_at: order.created_at ? dayjs(order.created_at).format("DD-MM-YYYY HH:mm:ss") : "",
+          duedate: order.duedate ? dayjs(order.duedate).format("DD-MM-YYYY") : "",
+          payment_status: order.payment_status || "",
+          approval_status: order.approval_status || "",
+          baseAmount: Number(order.baseAmount || 0),
+          taxamt: Number(order.taxamt || 0),
+          total_amount: Number(totalAmt) || 0,
+          paid_amount: Number(paidAmt) || 0,
+          balance_amount: Number(balanceAmt) || 0,
+        });
+      });
+
+      // Generate buffer
+      const buffer = await workbook.xlsx.writeBuffer();
+
+      // Create download link
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `orders_${dayjs().format("YYYYMMDD")}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Export error:", error);
+      alert("Failed to export data. Please try again.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const listFilterState = useMemo(
+    () => ({
+      appliedSearchQuery,
+      appliedStatusFilter,
+      appliedDateFrom,
+      appliedDateTo,
+      appliedCreatedByFilter,
+      appliedLeadCampaignFilter,
+      appliedApprovalStatusFilter,
+      appliedPaymentStatusFilter,
+      appliedModelNameFilters,
+    }),
+    [
+      appliedSearchQuery,
+      appliedStatusFilter,
+      appliedDateFrom,
+      appliedDateTo,
+      appliedCreatedByFilter,
+      appliedLeadCampaignFilter,
+      appliedApprovalStatusFilter,
+      appliedPaymentStatusFilter,
+      appliedModelNameFilters,
+    ],
+  );
+
+  const createdByFilterOptions = useMemo(() => {
+    if (!orders?.length) return [];
+    const users = new Set();
+    orders.forEach((order) => {
+      if (
+        orderMatchesListFilters(order, listFilterState, { omitCreatedBy: true }) &&
+        order.created_by
+      ) {
+        users.add(String(order.created_by).trim());
+      }
+    });
+    return [...users].sort((a, b) => a.localeCompare(b));
+  }, [orders, listFilterState]);
+
+  // Filter + sort orders (shared by table, stat cards, and amount summary)
+  const filteredOrders = useMemo(() => {
+    if (!orders) return [];
+
+    let result = orders.filter((order) =>
+      orderMatchesListFilters(order, listFilterState),
+    );
+
+    return [...result].sort((a, b) => {
+      const valA = getSortValue(a, sortColumn);
+      const valB = getSortValue(b, sortColumn);
+
+      if (typeof valA === "number" && typeof valB === "number") {
+        return sortDirection === "asc" ? valA - valB : valB - valA;
+      }
+
+      if (valA < valB) return sortDirection === "asc" ? -1 : 1;
+      if (valA > valB) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+  }, [orders, listFilterState, sortColumn, sortDirection]);
+
+  const catalogByCode = useMemo(() => {
+    const map = new Map();
+    productCatalog.forEach((product) => {
+      const key = normalizeModelCode(product.item_code);
+      if (key) map.set(key, product);
+    });
+    return map;
+  }, [productCatalog]);
+
+  const spareCatalogByCode = useMemo(() => {
+    const map = new Map();
+    spareCatalog.forEach((spare) => {
+      const numberKey = normalizeModelCode(spare.spare_number);
+      const idKey = normalizeModelCode(spare.id);
+      if (numberKey) map.set(numberKey, spare);
+      if (idKey) map.set(idKey, spare);
+    });
+    return map;
+  }, [spareCatalog]);
+
+  const modelOptions = useMemo(
+    () => buildModelOptions(orders, catalogByCode, spareCatalogByCode),
+    [orders, catalogByCode, spareCatalogByCode],
+  );
+
+  const filteredModelQuantity = useMemo(() => {
+    if (!appliedModelNameFilters.length) return 0;
+    return filteredOrders.reduce(
+      (sum, order) => sum + modelQuantityInOrders(order, appliedModelNameFilters),
+      0,
+    );
+  }, [filteredOrders, appliedModelNameFilters]);
+
+  const filteredModelOptions = useMemo(() => {
+    const query = modelSearchText.trim().toLowerCase();
+    const list = !query
+      ? modelOptions
+      : modelOptions.filter((opt) => {
+          const code = String(opt.item_code || "").toLowerCase();
+          const name = String(opt.item_name || "").toLowerCase();
+          const label = String(opt.label || "").toLowerCase();
+          return code.includes(query) || name.includes(query) || label.includes(query);
+        });
+    return sortModelOptions(list).slice(0, 50);
+  }, [modelOptions, modelSearchText]);
+
+  useEffect(() => {
+    if (!modelNameFilters.length || !modelOptions.length) return;
+    const normalized = normalizeModelFilterKeys(modelNameFilters, modelOptions);
+    const changed =
+      normalized.length !== modelNameFilters.length ||
+      normalized.some((key, index) => key !== modelNameFilters[index]);
+    if (changed) setModelNameFilters(normalized);
+  }, [modelNameFilters, modelOptions]);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        modelSearchRef.current &&
+        !modelSearchRef.current.contains(event.target)
+      ) {
+        setShowModelDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const ordersForStatCards = useMemo(
+    () => filteredOrders.filter((order) => !isOrderExcludedFromStatCards(order)),
+    [filteredOrders],
+  );
+
+  const leadCampaignFilterOptions = useMemo(() => {
+    const keys = new Set(LEAD_CAMPAIGN_OPTIONS.map((o) => o.value));
+    orders?.forEach((o) => {
+      const k = normalizeLeadCampaignKey(o.lead_campaign);
+      if (k) keys.add(k);
+    });
+    return [...keys].sort((a, b) =>
+      formatLeadCampaignLabel(a).localeCompare(formatLeadCampaignLabel(b)),
+    );
+  }, [orders]);
+
+  const orderStats = useMemo(() => {
+    const stats = ordersForStatCards.reduce(
+      (acc, order) => {
+        const taxable = getPaymentColumnAmount(order);
+        const paidOrder = getAccountantReportPaidAmount(order);
+        const approval = (order.approval_status || "")
+          .toString()
+          .trim()
+          .toLowerCase();
+        const isPendingApproval = approval === "pending";
+        const isApproved = approval === "approved";
+
+        if (isPendingApproval) {
+          acc.pending += 1;
+          acc.pendingAmount += taxable;
+        }
+
+        if (isApproved) {
+          acc.total += 1;
+          acc.totalAmount += taxable;
+          acc.approved += 1;
+          acc.approvedAmount += taxable;
+
+          if (isOrderDispatchedForStats(order)) {
+            acc.dispatched += 1;
+            acc.dispatchedAmount += taxable;
+          }
+          if (isOrderPendingDispatchForStats(order)) {
+            acc.pendingDispatch += 1;
+            acc.pendingDispatchAmount += taxable;
+          }
+
+          const pmtStatus = deriveOrderListPaymentStatus(order)
+            .toString()
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "");
+
+          if (pmtStatus === "paid") {
+            acc.paid += 1;
+          } else {
+            acc.unpaid += 1;
+          }
+
+          acc.paidAmount += paidOrder;
+        }
+
+        return acc;
+      },
+      {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        dispatched: 0,
+        pendingDispatch: 0,
+        paid: 0,
+        unpaid: 0,
+        totalAmount: 0,
+        pendingAmount: 0,
+        approvedAmount: 0,
+        dispatchedAmount: 0,
+        pendingDispatchAmount: 0,
+        paidAmount: 0,
+        unpaidAmount: 0,
+      },
+    );
+
+    return {
+      ...stats,
+      unpaidAmount: Math.max(0, stats.totalAmount - stats.paidAmount),
+    };
+  }, [ordersForStatCards]);
+
+  const rejectedOrderStats = useMemo(() => {
+    return (orders || []).reduce(
+      (acc, order) => {
+        if (!orderCreatedInDateRange(order, appliedDateFrom, appliedDateTo)) {
+          return acc;
+        }
+        if (order.is_cancelled) return acc;
+        if (normalizeApprovalStatus(order.approval_status) !== "rejected") {
+          return acc;
+        }
+        acc.rejected += 1;
+        acc.rejectedAmount += getPaymentColumnAmount(order);
+        return acc;
+      },
+      { rejected: 0, rejectedAmount: 0 },
+    );
+  }, [orders, appliedDateFrom, appliedDateTo]);
+
+  const activeStatCard = useMemo(() => {
+    if (appliedPaymentStatusFilter === "paid") return "paid";
+    if (appliedPaymentStatusFilter === "unpaid") return "unpaid";
+    if (appliedStatusFilter === "dispatchdone") return "dispatched";
+    if (appliedStatusFilter === "pendingdispatched") return "pendingDispatch";
+    if (appliedApprovalStatusFilter === "approved") return "approved";
+    if (appliedApprovalStatusFilter === "pending") return "pending";
+    if (appliedApprovalStatusFilter === "rejected") return "rejected";
+    if (
+      !appliedStatusFilter &&
+      !appliedApprovalStatusFilter &&
+      !appliedPaymentStatusFilter
+    ) {
+      return "total";
+    }
+    return "";
+  }, [appliedStatusFilter, appliedApprovalStatusFilter, appliedPaymentStatusFilter]);
+
+  const orderPieChartData = useMemo(() => {
+    const entries = [
+      {
+        key: "pending",
+        label: "Pending",
+        value: orderStats.pending,
+        color: "rgba(249, 115, 22, 0.85)",
+      },
+      {
+        key: "approved",
+        label: "Approved",
+        value: orderStats.approved,
+        color: "rgba(34, 197, 94, 0.85)",
+      },
+      {
+        key: "dispatched",
+        label: "Dispatched",
+        value: orderStats.dispatched,
+        color: "rgba(139, 92, 246, 0.85)",
+      },
+      {
+        key: "pendingDispatch",
+        label: "Pending Dispatch",
+        value: orderStats.pendingDispatch,
+        color: "rgba(245, 158, 11, 0.85)",
+      },
+      {
+        key: "paid",
+        label: "Paid",
+        value: orderStats.paid,
+        color: "rgba(16, 185, 129, 0.85)",
+      },
+      {
+        key: "unpaid",
+        label: "Unpaid",
+        value: orderStats.unpaid,
+        color: "rgba(249, 115, 22, 0.85)",
+      },
+    ].filter((entry) => entry.value > 0);
+
+    return {
+      labels: entries.map((entry) => entry.label),
+      keys: entries.map((entry) => entry.key),
+      datasets: [
+        {
+          data: entries.map((entry) => entry.value),
+          backgroundColor: entries.map((entry) => entry.color),
+          borderWidth: 2,
+          borderColor: "#ffffff",
+          hoverOffset: 8,
+        },
+      ],
+    };
+  }, [orderStats]);
+
+  const orderPieChartOptions = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      onClick: (_event, elements, chart) => {
+        if (!elements?.length) return;
+        const key = chart.data.keys?.[elements[0].index];
+        if (key) handleStatCardClick(key);
+      },
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: {
+            boxWidth: 12,
+            padding: 14,
+            font: { size: 11 },
+          },
+        },
+        title: {
+          display: true,
+          text: "Order Statistics Overview",
+          font: { size: 15, weight: "bold" },
+          padding: { bottom: 12 },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const val = ctx.parsed || 0;
+              const total = orderStats.total || 1;
+              const pct = ((val / total) * 100).toFixed(1);
+              return ` ${ctx.label}: ${val.toLocaleString("en-IN")} (${pct}% of total orders)`;
+            },
+          },
+        },
+      },
+    }),
+    [handleStatCardClick, orderStats.total],
+  );
+
+  const leadCampaignPieChartData = useMemo(() => {
+    const counts = {};
+    ordersForStatCards.forEach((order) => {
+      const key = normalizeLeadCampaignKey(order.lead_campaign) || "__none__";
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    const entries = Object.entries(counts)
+      .map(([key, value]) => ({
+        key,
+        label: key === "__none__" ? "No campaign" : formatLeadCampaignLabel(key),
+        value,
+        color:
+          key === "__none__"
+            ? "rgba(148, 163, 184, 0.85)"
+            : leadCampaignColor(key),
+      }))
+      .filter((entry) => entry.value > 0)
+      .sort((a, b) => b.value - a.value);
+
+    return {
+      labels: entries.map((entry) => entry.label),
+      keys: entries.map((entry) => entry.key),
+      datasets: [
+        {
+          data: entries.map((entry) => entry.value),
+          backgroundColor: entries.map((entry) => entry.color),
+          borderWidth: 2,
+          borderColor: "#ffffff",
+          hoverOffset: 8,
+        },
+      ],
+    };
+  }, [ordersForStatCards]);
+
+  const leadCampaignPieTotal = useMemo(() => {
+    const data = leadCampaignPieChartData.datasets[0]?.data || [];
+    return data.reduce((sum, n) => sum + Number(n || 0), 0);
+  }, [leadCampaignPieChartData]);
+
+  const leadCampaignPieChartOptions = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      onClick: (_event, elements, chart) => {
+        if (!elements?.length) return;
+        const key = chart.data.keys?.[elements[0].index];
+        if (!key) return;
+        const filterVal = key === "__none__" ? "__none__" : key;
+        setLeadCampaignFilter(filterVal);
+        setAppliedLeadCampaignFilter(filterVal);
+        persistOrderTableFilterState({
+          searchQuery: appliedSearchQuery,
+          statusFilter: appliedStatusFilter,
+          dateFrom: appliedDateFrom,
+          dateTo: appliedDateTo,
+          createdByFilter: appliedCreatedByFilter,
+          leadCampaignFilter: filterVal,
+          modelNameFilters: appliedModelNameFilters,
+          approvalStatusFilter: appliedApprovalStatusFilter,
+          paymentStatusFilter: appliedPaymentStatusFilter,
+        });
+      },
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { boxWidth: 12, padding: 10, font: { size: 10 } },
+        },
+        title: {
+          display: true,
+          text: "Orders by Lead Campaign",
+          font: { size: 14, weight: "bold" },
+          padding: { bottom: 8 },
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const val = ctx.parsed || 0;
+              const total = leadCampaignPieTotal || 1;
+              const pct = ((val / total) * 100).toFixed(1);
+              return ` ${ctx.label}: ${val.toLocaleString("en-IN")} (${pct}%)`;
+            },
+          },
+        },
+      },
+    }),
+    [
+      leadCampaignPieTotal,
+      appliedSearchQuery,
+      appliedStatusFilter,
+      appliedDateFrom,
+      appliedDateTo,
+      appliedCreatedByFilter,
+      appliedModelNameFilters,
+      appliedApprovalStatusFilter,
+      appliedPaymentStatusFilter,
+    ],
+  );
+
+  const dispatchDoneTotals = useMemo(() => {
+    if (!orders?.length) return { gstTotal: 0, taxableTotal: 0 };
+    return orders.reduce(
+      (acc, o) => {
+        if (!orderCreatedInDateRange(o, dateFrom, dateTo)) return acc;
+        if (o.approval_status !== "approved") return acc;
+        acc.gstTotal += Number(o.taxamt) || 0;
+        acc.taxableTotal += orderTaxableTotal(o);
+        return acc;
+      },
+      { gstTotal: 0, taxableTotal: 0 }
+    );
+  }, [orders, dateFrom, dateTo]);
+
+  const filteredTaxableTotals = useMemo(() => {
+    if (!filteredOrders?.length) return { taxableTotal: 0 };
+    return filteredOrders.reduce(
+      (acc, o) => {
+        if (o.approval_status !== "approved") return acc;
+        if (isOrderExcludedFromStatCards(o)) return acc;
+        acc.taxableTotal += getPaymentColumnAmount(o);
+        return acc;
+      },
+      { taxableTotal: 0 }
+    );
+  }, [filteredOrders]);
+
+  const filteredAmountTotals = useMemo(() => {
+    if (!filteredOrders?.length) return { totalAmount: 0, paidAmount: 0, taxableAmount: 0, balanceAmount: 0 };
+    return filteredOrders.reduce(
+      (acc, o) => {
+        if (o.approval_status !== "approved") return acc;
+        if (isOrderExcludedFromStatCards(o)) return acc;
+        acc.totalAmount += getTotalAmount(o);
+        acc.paidAmount += getAccountantReportPaidAmount(o);
+        acc.taxableAmount += getPaymentColumnAmount(o);
+        acc.balanceAmount += getBalanceAmount(o);
+        return acc;
+      },
+      { totalAmount: 0, paidAmount: 0, taxableAmount: 0, balanceAmount: 0 }
+    );
+  }, [filteredOrders]);
+
+  const getPaymentBadge = (paymentStatusRaw) => {
+    const s = (paymentStatusRaw || "").toString().trim().toLowerCase();
+    const compact = s.replace(/\s+/g, "");
+    if (compact === "paid") {
+      return {
+        text: "Paid",
+        cls: "bg-green-100 text-green-800 border-green-200",
+      };
+    }
+    if (compact === "partiallypaid") {
+      return {
+        text: "Partially Paid",
+        cls: "bg-yellow-100 text-yellow-800 border-yellow-200",
+      };
+    }
+    if (compact === "overdue") {
+      return {
+        text: "Over Due",
+        cls: "bg-red-100 text-red-800 border-red-200",
+      };
+    }
+    return {
+      text: s ? paymentStatusRaw : "Pending",
+      cls: "bg-white text-gray-700 border-gray-300",
+    };
+  };
+
+  const formatCompanyName = (name) => {
+    const text = String(name || "").trim();
+    if (!text) return "";
+    const words = text.split(/\s+/);
+    if (words.length <= 3) return text;
+    const first = words.slice(0, 3).join(" ");
+    const rest = words.slice(3).join(" ");
+    return (
+      <span className="inline-block text-left break-words max-w-full">
+        {first}
+        <br />
+        {rest}
+      </span>
+    );
+  };
+
+  const showListLoadingEmpty =
+    clientFetch && listLoading && filteredOrders.length === 0;
+  const showNoOrdersEmpty =
+    !listLoading && filteredOrders.length === 0;
+
+  const statCards = [
+    {
+      key: "total",
+      label: "Total-(Taxable)",
+      value: orderStats.total,
+      amount: orderStats.totalAmount,
+      icon: Package,
+      border: "border-slate-200",
+      bg: "bg-gradient-to-br from-slate-50 to-white",
+      labelColor: "text-slate-600",
+      valueColor: "text-slate-900",
+      iconBg: "bg-slate-200",
+      iconColor: "text-slate-700",
+    },
+    {
+      key: "approved",
+      label: "Approved",
+      value: orderStats.approved,
+      amount: orderStats.approvedAmount,
+      icon: CheckCircle,
+      border: "border-green-200",
+      bg: "bg-gradient-to-br from-green-50 to-white",
+      labelColor: "text-green-700",
+      valueColor: "text-green-800",
+      iconBg: "bg-green-200",
+      iconColor: "text-green-700",
+    },
+    {
+      key: "pending",
+      label: "Pending approval",
+      value: orderStats.pending,
+      amount: orderStats.pendingAmount,
+      icon: AlertCircle,
+      border: "border-orange-200",
+      bg: "bg-gradient-to-br from-orange-50 to-white",
+      labelColor: "text-orange-700",
+      valueColor: "text-orange-800",
+      iconBg: "bg-orange-200",
+      iconColor: "text-orange-700",
+    },
+    {
+      key: "dispatched",
+      label: "Dispatched",
+      value: orderStats.dispatched,
+      amount: orderStats.dispatchedAmount,
+      icon: Truck,
+      border: "border-violet-200",
+      bg: "bg-gradient-to-br from-violet-50 to-white",
+      labelColor: "text-violet-700",
+      valueColor: "text-violet-800",
+      iconBg: "bg-violet-200",
+      iconColor: "text-violet-700",
+    },
+    {
+      key: "pendingDispatch",
+      label: "Pending Dispatch",
+      value: orderStats.pendingDispatch,
+      amount: orderStats.pendingDispatchAmount,
+      icon: Clock,
+      border: "border-amber-200",
+      bg: "bg-gradient-to-br from-amber-50 to-white",
+      labelColor: "text-amber-700",
+      valueColor: "text-amber-800",
+      iconBg: "bg-amber-200",
+      iconColor: "text-amber-700",
+    },
+    {
+      key: "paid",
+      label: "Paid",
+      value: orderStats.paid,
+      amount: orderStats.paidAmount,
+      icon: CheckCircle,
+      border: "border-emerald-200",
+      bg: "bg-gradient-to-br from-emerald-50 to-white",
+      labelColor: "text-emerald-700",
+      valueColor: "text-emerald-800",
+      iconBg: "bg-emerald-200",
+      iconColor: "text-emerald-700",
+    },
+    {
+      key: "unpaid",
+      label: "Unpaid",
+      value: orderStats.unpaid,
+      amount: orderStats.unpaidAmount,
+      icon: CreditCard,
+      border: "border-orange-200",
+      bg: "bg-gradient-to-br from-orange-50 to-white",
+      labelColor: "text-orange-700",
+      valueColor: "text-orange-800",
+      iconBg: "bg-orange-200",
+      iconColor: "text-orange-700",
+    },
+    {
+      key: "rejected",
+      label: "Rejected",
+      value: rejectedOrderStats.rejected,
+      amount: rejectedOrderStats.rejectedAmount,
+      icon: XCircle,
+      border: "border-red-200",
+      bg: "bg-gradient-to-br from-red-50 to-white",
+      labelColor: "text-red-700",
+      valueColor: "text-red-800",
+      iconBg: "bg-red-200",
+      iconColor: "text-red-700",
+    },
+  ];
+
+  const renderStatCard = (card) => {
+    const Icon = card.icon;
+    const isActive = activeStatCard === card.key;
+    return (
+      <button
+        key={card.key}
+        type="button"
+        onClick={() => handleStatCardClick(card.key)}
+        className={`w-full rounded-lg border ${card.border} ${card.bg} shadow-sm p-2 text-left transition-all hover:shadow-md ${
+          isActive ? "ring-2 ring-blue-500 ring-offset-1 shadow-md" : ""
+        }`}
+      >
+        <div className="flex items-start justify-between gap-1.5">
+          <div className="min-w-0">
+            <p className={`text-[10px] font-semibold uppercase tracking-wide leading-tight ${card.labelColor}`}>
+              {card.label}
+            </p>
+            <p className={`text-lg font-bold tabular-nums mt-0.5 ${card.valueColor}`}>
+              ₹{(Number(card.amount) || 0).toLocaleString("en-IN", {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 0,
+              })}
+            </p>
+          
+          </div>
+          <div className={`${card.iconBg} p-1.5 rounded-md shrink-0`}>
+            <Icon size={14} className={card.iconColor} />
+          </div>
+        </div>
+      </button>
+    );
+  };
+
+  const renderPieChart = (compact = false) => (
+    <div
+      className={`rounded-xl border border-slate-200 bg-white shadow-sm h-full flex flex-col min-w-0 ${
+        compact ? "p-2" : "p-4"
+      }`}
+    >
+      <div className={compact ? "mb-1" : "mb-3"}>
+        <p
+          className={`font-semibold text-gray-800 ${
+            compact ? "text-xs" : "text-sm"
+          }`}
+        >
+          Order Distribution
+        </p>
+      </div>
+      <div
+        className={`flex-1 lg:min-h-0 ${
+          compact ? "min-h-[160px]" : "min-h-[220px]"
+        }`}
+      >
+        {orderStats.total > 0 && orderPieChartData.labels.length > 0 ? (
+          <Pie data={orderPieChartData} options={orderPieChartOptions} />
+        ) : (
+          <div
+            className={`flex h-full items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50 text-gray-500 ${
+              compact ? "min-h-[160px] text-xs px-1" : "min-h-[220px] text-sm"
+            }`}
+          >
+            No order data for the selected date range
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderLeadCampaignPieChart = () => (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm p-4 h-full flex flex-col">
+      <div className="flex-1 min-h-[220px] lg:min-h-0">
+        {leadCampaignPieTotal > 0 && leadCampaignPieChartData.labels.length > 0 ? (
+          <Pie
+            data={leadCampaignPieChartData}
+            options={leadCampaignPieChartOptions}
+          />
+        ) : (
+          <div className="flex h-full min-h-[220px] items-center justify-center rounded-lg border border-dashed border-gray-200 bg-gray-50 text-sm text-gray-500 text-center px-3">
+            No lead campaign data for current filters
+          </div>
+        )}
+      </div>
+      <p className="text-[10px] text-gray-500 mt-2 text-center">
+        Click a slice to filter by campaign
+      </p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Mobile / tablet: all cards in grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 lg:hidden">
+        {statCards.map((card) => renderStatCard(card))}
+      </div>
+
+      {/* Large screen: 3 cards per row | pie chart */}
+      <div className="hidden lg:grid lg:grid-cols-[minmax(0,2fr)_minmax(0,1.35fr)] gap-3 items-stretch">
+        <div className="grid grid-cols-3 gap-2 content-start">
+          {statCards.map((card) => renderStatCard(card))}
+        </div>
+
+        <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-2 min-h-0 items-stretch">
+          {renderPieChart(true)}
+          {renderLeadCampaignPieChart()}
+        </div>
+      </div>
+
+      {/* Mobile / tablet: pie charts below cards */}
+      <div className="lg:hidden space-y-3">
+        {renderPieChart()}
+        {renderLeadCampaignPieChart()}
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+        {/* Combined Amount Summary Card */}
+        <div className={`w-full rounded-xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-white shadow-sm p-3 sm:p-4 cursor-default hover:shadow-md transition-shadow`}>
+          <div className="flex items-start justify-between">
+            <div className="w-full">
+              <p className="text-xs text-emerald-700 mb-0.5 font-semibold uppercase tracking-wide">
+                Amount Summary
+              </p>
+              <p className="text-[10px] text-emerald-600/90 mb-2 leading-tight">
+                Approved orders only
+              </p>
+              
+              {/* Total Amount */}
+              <div className="mb-2 pb-2 border-b border-emerald-100">
+                <p className="text-[10px] text-emerald-600 font-medium">Total Amount</p>
+                <p className="text-lg font-bold text-emerald-950 tabular-nums">
+                  ₹{filteredAmountTotals.totalAmount.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </p>
+              </div>
+
+              {/* Paid Amount */}
+              <div>
+                <p className="text-[10px] text-blue-600 font-medium">Paid Amount</p>
+                <p className="text-lg font-bold text-blue-700 tabular-nums">
+                  ₹{filteredAmountTotals.paidAmount.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Combined Balance & Taxable Amount Card */}
+        <div className={`w-full rounded-xl border border-purple-200 bg-gradient-to-br from-purple-50 to-white shadow-sm p-3 sm:p-4 cursor-default hover:shadow-md transition-shadow`}>
+          <div className="flex items-start justify-between">
+            <div className="w-full">
+              <p className="text-xs text-purple-700 mb-0.5 font-semibold uppercase tracking-wide">
+                Balance & Taxable
+              </p>
+              <p className="text-[10px] text-purple-600/90 mb-2 leading-tight">
+                Approved orders only
+              </p>
+
+              {/* Balance Amount */}
+              <div className="mb-2 pb-2 border-b border-purple-100">
+                <p className="text-[10px] text-orange-600 font-medium">Balance Amount</p>
+                <p className="text-lg font-bold text-orange-700 tabular-nums">
+                  ₹{filteredAmountTotals.balanceAmount.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </p>
+              </div>
+
+              {/* Taxable Amount */}
+              <div>
+                <p className="text-[10px] text-purple-600 font-medium">Taxable Amount</p>
+                <p className="text-lg font-bold text-purple-950 tabular-nums">
+                  ₹{filteredAmountTotals.taxableAmount.toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="w-full rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 to-white shadow-sm p-3 sm:p-4 cursor-default hover:shadow-md transition-shadow">
+          <div className="flex items-start justify-between">
+            <div className="w-full">
+              <p className="text-xs text-blue-700 mb-0.5 font-semibold uppercase tracking-wide">
+                Model Summary
+              </p>
+              <p className="text-[10px] text-blue-600/90 mb-2 leading-tight">
+                Select one or more models
+              </p>
+
+              <div ref={modelSearchRef} className="relative mb-2">
+                <div className="relative">
+                  <Search
+                    size={14}
+                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-blue-400"
+                  />
+                  <input
+                    type="text"
+                    value={modelSearchText}
+                    onChange={(e) => {
+                      setModelSearchText(e.target.value);
+                      setShowModelDropdown(true);
+                    }}
+                    onFocus={() => setShowModelDropdown(true)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        setShowModelDropdown(false);
+                      } else if (e.key === "Enter" && filteredModelOptions.length > 0) {
+                        e.preventDefault();
+                        toggleModelFilter(filteredModelOptions[0]);
+                      }
+                    }}
+                    placeholder="Search model code or name..."
+                    autoComplete="off"
+                    className="w-full border border-blue-200 rounded-lg py-1.5 pl-7 pr-7 text-xs bg-white"
+                  />
+                  {(modelSearchText || modelNameFilters.length > 0) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModelNameFilters([]);
+                        setModelSearchText("");
+                        setShowModelDropdown(false);
+                      }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-blue-400 hover:text-blue-600"
+                      aria-label="Clear model filters"
+                    >
+                      <XCircle size={14} />
+                    </button>
+                  )}
+                </div>
+
+                {modelNameFilters.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {modelNameFilters.map((filterKey) => (
+                      <span
+                        key={filterKey}
+                        className="inline-flex max-w-full items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-800"
+                      >
+                        <span className="truncate">{getModelLabel(filterKey, modelOptions)}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeModelFilter(filterKey)}
+                          className="shrink-0 text-blue-500 hover:text-blue-700"
+                          aria-label={`Remove ${getModelLabel(filterKey, modelOptions)}`}
+                        >
+                          <XCircle size={12} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {showModelDropdown && (
+                  <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-48 overflow-y-auto rounded-lg border border-blue-200 bg-white shadow-lg">
+                    {!modelSearchText.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setModelNameFilters([]);
+                          setShowModelDropdown(false);
+                        }}
+                        className="w-full border-b border-blue-50 px-3 py-2 text-left text-xs text-blue-700 hover:bg-blue-50"
+                      >
+                        All Models
+                      </button>
+                    )}
+                    {filteredModelOptions.length > 0 ? (
+                      filteredModelOptions.map((opt) => {
+                        const selected = isModelFilterSelected(modelNameFilters, opt);
+                        return (
+                          <button
+                            key={opt.filterKey}
+                            type="button"
+                            onClick={() => toggleModelFilter(opt)}
+                            className={`flex w-full items-center gap-2 border-b border-blue-50 px-3 py-2 text-left text-xs hover:bg-blue-50 ${
+                              selected ? "bg-blue-50 font-medium text-blue-900" : "text-gray-700"
+                            }`}
+                          >
+                            <span
+                              className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                                selected
+                                  ? "border-blue-600 bg-blue-600 text-white"
+                                  : "border-gray-300 bg-white"
+                              }`}
+                            >
+                              {selected ? <CheckCircle size={10} /> : null}
+                            </span>
+                            <span className="truncate">{opt.label}</span>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="px-3 py-2 text-xs text-gray-500">
+                        No models found
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {modelNameFilters.length > 0 ? (
+                <>
+                  <div className="mb-2 pb-2 border-b border-blue-100">
+                    <p className="text-[10px] text-blue-600 font-medium">
+                      Total Quantity ({modelNameFilters.length} model
+                      {modelNameFilters.length === 1 ? "" : "s"})
+                    </p>
+                    <p className="text-lg font-bold text-blue-950 tabular-nums">
+                      {filteredModelQuantity.toLocaleString("en-IN")}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-sky-600 font-medium">Orders</p>
+                    <p className="text-lg font-bold text-sky-700 tabular-nums">
+                      {filteredOrders.length.toLocaleString("en-IN")}
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-blue-600/80">
+                  Select one or more models to view quantity
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Original Taxable Card - COMMENTED OUT */}
+        {/* <div
+          onClick={() => {
+            if (userRole !== "SUPERADMIN") return;
+            const next = taxableClickCount + 1;
+            setTaxableClickCount(next);
+            if (next >= 5) {
+              setShowNukePanel((p) => !p);
+              setTaxableClickCount(0);
+            }
+          }}
+          className={`w-full rounded-xl border border-violet-200 bg-gradient-to-br from-violet-50 to-white shadow-sm p-3 sm:p-4 cursor-default hover:shadow-md transition-shadow`}
+        >
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs text-violet-700 mb-0.5 font-semibold uppercase tracking-wide">
+                Dispatch Taxable
+              </p>
+              <p className="text-[10px] text-violet-600/90 mb-1 leading-tight">
+                Total amount without GST
+              </p>
+              <p className="text-xl sm:text-2xl font-bold text-violet-950 tabular-nums">
+                ₹
+                {dispatchDoneTotals.taxableTotal.toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Original Filtered Taxable Card - COMMENTED OUT */}
+        {/* <div
+          className={`w-full rounded-xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm p-3 sm:p-4 cursor-default hover:shadow-md transition-shadow`}
+        >
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs text-indigo-700 mb-0.5 font-semibold uppercase tracking-wide">
+                Filtered Taxable
+              </p>
+              <p className="text-[10px] text-indigo-600/90 mb-1 leading-tight">
+                {createdByFilter ? `By ${createdByFilter}` : "All Users"}
+              </p>
+              <p className="text-xl sm:text-2xl font-bold text-indigo-950 tabular-nums">
+                ₹
+                {filteredTaxableTotals.taxableTotal.toLocaleString("en-IN", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </p>
+            </div>
+          </div>
+        </div> */}
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={handleExportToExcel}
+          disabled={isExporting}
+          className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+        >
+          {isExporting ? "Exporting..." : "Export Excel"}
+        </button>
+      </div>
+
+      {/* 🧰 Filters */}
+      <div className="flex flex-wrap items-end gap-3">
+        <OrderListSearchInput
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+          onApply={handleApplySearch}
+        />
+        <div className="min-w-[140px] flex-1 sm:max-w-[200px]">
+          <label className="block text-xs text-gray-600 mb-1">Status</label>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">All Status</option>
+            <option value="pendinginvoice">Pending Invoice</option>
+            <option value="invoiceuploaded">Invoice Uploaded</option>
+            <option value="bookingdone">Booking Done</option>
+            <option value="dispatchdone">Dispatch Done</option>
+            <option value="delivered">Delivered</option>
+            <option value="installed">Installed</option>
+            <option value="canceled">Canceled</option>
+            <option value="returninitiated">Return Initiated</option>
+            <option value="returnbookingdone">Return Booking Done</option>
+            <option value="partiallyreturned">Partially Returned</option>
+            <option value="fullyreturned">Fully Returned</option>
+            <option value="returncompleted">Return Completed</option>
+          </select>
+        </div>
+
+        <div className="min-w-[140px] flex-1 sm:max-w-[200px]">
+          <label className="block text-xs text-gray-600 mb-1">From Date</label>
+          <TypeableDateFilterInput value={dateFrom} onChange={setDateFrom} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+        </div>
+
+        <div className="min-w-[140px] flex-1 sm:max-w-[200px]">
+          <label className="block text-xs text-gray-600 mb-1">To Date</label>
+          <TypeableDateFilterInput value={dateTo} onChange={setDateTo} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"/>
+        </div>
+
+        <div className="min-w-[140px] flex-1 sm:max-w-[200px]">
+          <label className="block text-xs text-gray-600 mb-1">Created By</label>
+          <select
+            value={createdByFilter}
+            onChange={(e) => setCreatedByFilter(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">All Users</option>
+            {createdByFilterOptions.map((user) => (
+              <option key={user} value={user}>
+                {user}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="min-w-[140px] flex-1 sm:max-w-[200px]">
+          <label className="block text-xs text-gray-600 mb-1">Lead Campaign</label>
+          <select
+            value={leadCampaignFilter}
+            onChange={(e) => setLeadCampaignFilter(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">All Campaigns</option>
+            <option value="__none__">No campaign</option>
+            {leadCampaignFilterOptions.map((key) => (
+              <option key={key} value={key}>
+                {formatLeadCampaignLabel(key)}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="min-w-[140px] flex-1 sm:max-w-[200px]">
+          <label className="block text-xs text-gray-600 mb-1">
+            Approval Status
+          </label>
+          <select
+            value={approvalStatusFilter}
+            onChange={(e) => setApprovalStatusFilter(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+          >
+            <option value="">All Status</option>
+            <option value="pending">Pending</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </div>
+
+        <div className="flex items-end shrink-0 order-last gap-2">
+          <OrderListSearchResetButton onReset={handleResetFilters} />
+          <OrderListSearchApplyButton onApply={handleApplySearch} embedded />
+        </div>
+      </div>
+
+      <p className="mt-2 text-xs text-gray-500">
+        Rejected orders are hidden by default — use Approval Status &quot;Rejected&quot;, then Search.
+      </p>
+
+      {/* 👨‍💼 TABLE VIEW for large screens */}
+      {fetchError && (
+        <p className="text-sm text-red-600 mb-2">{fetchError}</p>
+      )}
+
+      <div
+        ref={tableScrollRef}
+        className="hidden lg:block overflow-x-auto overflow-y-auto max-h-[calc(100vh-160px)] min-h-[calc(100vh-240px)] bg-white rounded-xl shadow-lg"
+      >
+        <table className="w-full min-w-[1100px] text-sm">
+          <thead className="bg-gray-800 text-white sticky top-0 z-10">
+            <tr>
+              <th className="px-3 py-3 font-semibold text-center">#</th>
+              <th 
+                className="px-3 py-3 font-semibold text-left cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("order_id")}
+              >
+                <div className="flex items-center gap-1">
+                  Order ID
+                  {sortColumn === "order_id" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-left cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("created_by")}
+              >
+                <div className="flex items-center gap-1">
+                  Created By
+                  {sortColumn === "created_by" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-left cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("created_at")}
+              >
+                <div className="flex items-center gap-1">
+                  Order Date
+                  {sortColumn === "created_at" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th
+                className="px-3 py-3 font-semibold text-left cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("lead_campaign")}
+              >
+                <div className="flex items-center gap-1">
+                  Lead Campaign
+                  {sortColumn === "lead_campaign" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-left cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("company_name")}
+              >
+                <div className="flex items-center gap-1">
+                  Company
+                  {sortColumn === "company_name" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-left cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("item_name")}
+              >
+                <div className="flex items-center gap-1">
+                  Item
+                  {sortColumn === "item_name" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-center cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("status")}
+              >
+                <div className="flex items-center gap-1 justify-center">
+                  Status
+                  {sortColumn === "status" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-center cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("taxable_amount")}
+              >
+                <div className="flex items-center gap-1 justify-center">
+                  Taxable
+                  {sortColumn === "taxable_amount" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-center cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("totalamt")}
+              >
+                <div className="flex items-center gap-1 justify-center">
+                  Amount Details
+                  {(sortColumn === "totalamt" || sortColumn === "paid_amount" || sortColumn === "balance_amount") && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-center cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("approval_status")}
+              >
+                <div className="flex items-center gap-1 justify-center">
+                  Approval
+                  {sortColumn === "approval_status" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th className="px-3 py-3 font-semibold text-center">
+                Linked Payment
+              </th>
+              <th 
+                className="px-3 py-3 font-semibold text-center cursor-pointer hover:bg-gray-700 transition-colors"
+                onClick={() => handleSort("duedate")}
+              >
+                <div className="flex items-center gap-1 justify-center">
+                  Due Date
+                  {sortColumn === "duedate" && (
+                    sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />
+                  )}
+                </div>
+              </th>
+              <th className="px-3 py-3 font-semibold text-center">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-200">
+            {filteredOrders.length > 0 ? (
+              filteredOrders.map((r, i) => {
+                const status = getStatusText(r);
+                const pay = getPaymentBadge(deriveOrderListPaymentStatus(r));
+                const paidUi = getOrderPaidAmountUiClasses(r);
+                return (
+                  <tr
+                    key={r.order_id}
+                    className="hover:bg-gray-50 text-center transition-colors duration-150"
+                  >
+                    <td className="px-3 py-3">{i + 1}</td>
+                    <td className="px-3 py-3 font-medium text-gray-800">
+                      <div className="space-y-1">
+                        {r.quote_number ? (
+                          <Link
+                            href={`/admin-dashboard/quotations/${r.quote_number}`}
+                            className="text-blue-600 hover:text-blue-800 hover:underline font-semibold text-sm break-words"
+                            title="View Quotation"
+                          >
+                            Q: {r.quote_number}
+                          </Link>
+                        ) : (
+                          <div className="text-gray-400 text-xs">No Quote</div>
+                        )}
+                        <div className="text-gray-800 font-medium">
+                          Ord: {r.order_id}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 font-medium text-gray-800">
+                      {r.created_by}
+                    </td>
+                    <td className="px-3 py-3 text-left">
+                      {dayjs(r.created_at).format("DD-MM-YYYY")}
+                    </td>
+                    <td className="px-3 py-3 text-left text-xs font-medium text-indigo-800">
+                      {formatLeadCampaignLabel(r.lead_campaign)}
+                    </td>
+                    <td className="px-3 py-3 text-left">
+                      <div className="space-y-1 text-xs">
+                        <div>
+                          <span className="font-semibold">Client:</span>{" "}
+                          {r.client_name}
+                        </div>
+                        <div>
+                          <span className="font-semibold">Company:</span>{" "}
+                          {formatCompanyName(r.company_name)}
+                        </div>
+                        <div>
+                          <span className="font-semibold">Contact:</span>{" "}
+                          {r.contact}
+                        </div>
+                        <div>
+                          <span className="font-semibold">Location:</span>{" "}
+                          {r.state}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3 text-left">
+                      <div className="space-y-1 text-xs">
+                        <div>
+                          <span className="font-semibold">Item:</span>{" "}
+                          {r.item_name}
+                        </div>
+                        <div>
+                          <span className="font-semibold">Modal:</span>{" "}
+                          {r.item_code}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3">
+                      <span
+                        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${status.bg} ${status.textCol}`}
+                      >
+                        {status.icon} {status.text}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3">
+                      <div className="flex flex-col items-center gap-1">
+                        <div className="font-semibold text-sm">
+                          ₹{getPaymentColumnAmount(r).toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </div>
+                        <OrderPaymentHistoryTrigger
+                          order={r}
+                          paymentStatusRaw={deriveOrderListPaymentStatus(r)}
+                          totalAmount={getTotalAmount(r)}
+                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border underline decoration-current underline-offset-2 hover:opacity-90 ${pay.cls}`}
+                        >
+                          {pay.text}
+                        </OrderPaymentHistoryTrigger>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3">
+                      <div className="space-y-1 text-sm">
+                        <div className="flex justify-between gap-4">
+                          <span className="font-semibold text-gray-700">Total:</span>
+                          <span className="font-bold text-gray-900">
+                            ₹{getTotalAmount(r).toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span className={paidUi.label}>Paid:</span>
+                          <OrderPaymentHistoryTrigger
+                            order={r}
+                            paymentStatusRaw={deriveOrderListPaymentStatus(r)}
+                            totalAmount={getTotalAmount(r)}
+                            className={paidUi.value}
+                          >
+                            ₹
+                            {getTotalPaidAmount(r).toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </OrderPaymentHistoryTrigger>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                          <span className="font-semibold text-orange-700">Balance:</span>
+                          <span className="font-bold text-orange-600">
+                            ₹{getBalanceAmount(r).toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-3">
+                      <ApprovalActions r={r} userRole={userRole} />
+                    </td>
+                    <td className="px-3 py-3">
+                      <LinkedStatementPaymentCell order={r} />
+                    </td>
+                    <td className="px-3 py-3 text-center">
+                      {dayjs(r.duedate).format("DD-MM-YYYY")}
+                    </td>
+                    <td className="px-3 py-3 space-x-2 flex items-center justify-center relative">
+                      <ActionButtons
+                        r={r}
+                        userRole={userRole}
+                        isOpen={openMenuId === r.order_id}
+                        toggleMenu={() => toggleMenu(r.order_id)}
+                      />
+                    </td>
+                  </tr>
+                );
+              })
+            ) : showListLoadingEmpty ? (
+              <tr>
+                <td colSpan={15} className="px-6 py-8 text-center text-gray-600">
+                  Loading…
+                </td>
+              </tr>
+            ) : showNoOrdersEmpty ? (
+              <tr>
+                <td colSpan={15} className="px-6 py-4 text-center text-gray-500">
+                  No orders found.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+
+      {clientFetch && !listLoading && orders.length > 0 && (
+        <div className="hidden lg:flex items-center justify-between text-xs text-gray-600 px-1">
+          <span>
+            Showing {filteredOrders.length} of {orders.length} loaded
+            {hasMore ? " — scroll for more" : " — all loaded"}
+          </span>
+          {loadingMore && (
+            <span className="font-medium text-blue-600">Loading more…</span>
+          )}
+        </div>
+      )}
+
+      {/* 📱 CARD VIEW for mobile */}
+      <div className="lg:hidden space-y-4">
+        {filteredOrders.length > 0 ? (
+          filteredOrders.map((r, i) => {
+            const status = getStatusText(r);
+            const pay = getPaymentBadge(deriveOrderListPaymentStatus(r));
+            const paidUi = getOrderPaidAmountUiClasses(r);
+            return (
+              <div
+                key={r.order_id}
+                className="bg-white border border-gray-200 rounded-xl shadow-md p-4 space-y-2 text-sm"
+              >
+                <div className="flex justify-between items-start gap-2 flex-wrap">
+                  <span className="text-xs text-gray-500">#{i + 1}</span>
+                  <div className="flex items-center gap-2 flex-wrap justify-end min-w-0">
+                    <span className="font-medium text-gray-800 text-xs shrink-0">
+                      {dayjs(r.created_at).format("DD-MM-YYYY")}
+                    </span>
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium shrink-0 ${status.bg} ${status.textCol}`}
+                    >
+                      {status.text}
+                    </span>
+                    <div className="flex flex-col items-center gap-1 shrink-0">
+                      {r.approval_status === "approved" && (
+                        <div className="font-semibold text-xs">
+                          ₹{amountWithoutGst(r).toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </div>
+                      )}
+                      <OrderPaymentHistoryTrigger
+                        order={r}
+                        paymentStatusRaw={deriveOrderListPaymentStatus(r)}
+                        totalAmount={getTotalAmount(r)}
+                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border underline decoration-current underline-offset-2 hover:opacity-90 ${pay.cls}`}
+                      >
+                        {pay.text}
+                      </OrderPaymentHistoryTrigger>
+                    </div>
+                    <span className="shrink-0">
+                      <ActionButtons
+                        r={r}
+                        userRole={userRole}
+                        isOpen={openMenuId === r.order_id}
+                        toggleMenu={() => toggleMenu(r.order_id)}
+                      />
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <strong>Order Id:</strong> {r.order_id}
+                </div>
+                <div>
+                  {r.quote_number ? (
+                    <Link
+                      href={`/admin-dashboard/quotations/${r.quote_number}`}
+                      className="text-blue-600 hover:text-blue-800 hover:underline text-sm"
+                      title="View Quotation"
+                    >
+                      <strong>Quote #:</strong> {r.quote_number}
+                    </Link>
+                  ) : (
+                    <div className="text-gray-400 text-xs">
+                      <strong>Quote:</strong> Not available
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <strong>Created By:</strong> {r.created_by || "-"}
+                </div>
+                <div>
+                  <strong>Lead Campaign:</strong>{" "}
+                  {formatLeadCampaignLabel(r.lead_campaign)}
+                </div>
+
+                <div>
+                  <strong>Client:</strong> {r.client_name}
+                </div>
+                <div className="whitespace-normal break-words max-w-full">
+                  <strong>Company:</strong> {formatCompanyName(r.company_name)}
+                </div>
+                <div>
+                  <strong>Contact:</strong> {r.contact}
+                </div>
+                <div>
+                  <strong>Location:</strong> {r.state}
+                </div>
+                <div>
+                  <strong>Due Date:</strong> {dayjs(r.duedate).format("DD-MM-YYYY")}
+                </div>
+                <div className="pt-1">
+                  <strong>Linked Payment:</strong>
+                  <div className="mt-1 pl-1">
+                    <LinkedStatementPaymentCell order={r} />
+                  </div>
+                </div>
+                <div>
+                  <strong>Total Amount:</strong> ₹{getTotalAmount(r).toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </div>
+                <div>
+                  <strong>Paid Amount:</strong>{" "}
+                  <OrderPaymentHistoryTrigger
+                    order={r}
+                    paymentStatusRaw={deriveOrderListPaymentStatus(r)}
+                    totalAmount={getTotalAmount(r)}
+                    className={paidUi.value}
+                  >
+                    ₹
+                    {getTotalPaidAmount(r).toLocaleString("en-IN", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </OrderPaymentHistoryTrigger>
+                </div>
+                <div>
+                  <strong>Balance Amount:</strong> <span className="text-orange-600">₹{getBalanceAmount(r).toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}</span>
+                </div>
+
+                {/* Approval Actions - Approve/Reject/Revert - visible on mobile */}
+                <div className="pt-2 border-t border-gray-100">
+                  <ApprovalActions r={r} userRole={userRole} />
+                </div>
+
+              </div>
+            );
+          })
+        ) : showListLoadingEmpty ? (
+          <p className="text-center text-gray-600 py-8">Loading…</p>
+        ) : showNoOrdersEmpty ? (
+          <p className="text-center text-gray-500">No orders found.</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// ── Return Initiate ──────────────────────────────────────────────────────────
+function ReturnInitiateMenuItem({ order }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState([]);
+  const [loadingItems, setLoadingItems] = useState(false);
+  const [selectedItems, setSelectedItems] = useState({});
+  const [submitting, setSubmitting] = useState(false);
+
+  const dispatchDone = Number(order.dispatch_status) === 1;
+  if (!dispatchDone) return null;
+
+  const fetchItems = async () => {
+    setLoadingItems(true);
+    try {
+      const res = await fetch(
+        `/api/orders/items?quote_number=${encodeURIComponent(order.quote_number)}`
+      );
+      const json = await res.json();
+      if (json.success) {
+        setItems(json.items || []);
+      } else {
+        toast.error(json.error || "Failed to load items");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to load order items");
+    } finally {
+      setLoadingItems(false);
+    }
+  };
+
+  const handleOpen = (e) => {
+    e.stopPropagation();
+    setOpen(true);
+    setSelectedItems({});
+    fetchItems();
+  };
+
+  const toggleItem = (itemId) => {
+    setSelectedItems((prev) => {
+      const next = { ...prev };
+      if (next[itemId]) {
+        delete next[itemId];
+      } else {
+        next[itemId] = true;
+      }
+      return next;
+    });
+  };
+
+  const selectedCount = Object.keys(selectedItems).length;
+
+  const handleCreateCreditNote = async () => {
+    if (selectedCount === 0) {
+      toast.error("Please select at least one product to return");
+      return;
+    }
+    const returnItems = items.filter((it) => selectedItems[it.id]);
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/orders/return-initiate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          quote_number: order.quote_number,
+          items: returnItems.map((it) => ({
+            id: it.id,
+            item_name: it.item_name,
+            item_code: it.item_code,
+            qty: it.quantity || 1,
+            price: it.total_taxable_amt || it.taxable_price || it.total_price || 0,
+          })),
+        }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        toast.success("Credit note created! Opening…");
+        setOpen(false);
+        // Store draft data in sessionStorage — will only be saved to DB on "Download & Save"
+        sessionStorage.setItem("creditNoteDraft", JSON.stringify(json.draft));
+        sessionStorage.setItem("creditNoteReturnPath", "/admin-dashboard/order");
+        // Navigate to the credit note preview page
+        router.push(`/admin-dashboard/credit-notes/new`);
+      } else {
+        toast.error(json.error || "Failed to create credit note");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to initiate return");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={handleOpen}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-orange-50 text-orange-700 text-left"
+        title="Initiate Return"
+      >
+        <ArrowUp size={16} />
+        <span>Return Initiate</span>
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={(e) => e.target === e.currentTarget && setOpen(false)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">
+                  Return Initiate
+                </h3>
+                <p className="text-sm text-gray-500">
+                  Order: <span className="font-medium text-gray-700">{order.order_id}</span>
+                  {order.client_name && (
+                    <> &nbsp;·&nbsp; {order.client_name}</>
+                  )}
+                </p>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="text-gray-400 hover:text-gray-600 text-xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Instructions */}
+            <p className="text-sm text-gray-600 mb-4">
+              Select the products to include in the return. A credit note will be created for the selected items.
+            </p>
+
+            {/* Product List */}
+            <div className="border border-gray-200 rounded-lg overflow-hidden mb-5">
+              {loadingItems ? (
+                <div className="py-8 text-center text-gray-500 text-sm">
+                  Loading products…
+                </div>
+              ) : items.length === 0 ? (
+                <div className="py-8 text-center text-gray-500 text-sm">
+                  No products found for this order.
+                </div>
+              ) : (
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th className="w-10 px-3 py-2"></th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Product</th>
+                      <th className="px-3 py-2 text-left font-medium text-gray-600">Code</th>
+                      <th className="px-3 py-2 text-right font-medium text-gray-600">Qty</th>
+                      <th className="px-3 py-2 text-right font-medium text-gray-600">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((item) => (
+                      <tr
+                        key={item.id}
+                        onClick={() => toggleItem(item.id)}
+                        className={`border-t border-gray-100 cursor-pointer transition-colors ${
+                          selectedItems[item.id]
+                            ? "bg-orange-50"
+                            : "hover:bg-gray-50"
+                        }`}
+                      >
+                        <td className="px-3 py-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedItems[item.id]}
+                            onChange={() => toggleItem(item.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="w-4 h-4 accent-orange-500 cursor-pointer"
+                          />
+                        </td>
+                        <td className="px-3 py-2 font-medium text-gray-800">
+                          {item.item_name || "-"}
+                        </td>
+                        <td className="px-3 py-2 text-gray-500 font-mono text-xs">
+                          {item.item_code || "-"}
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-700">
+                          {item.quantity || 1}
+                        </td>
+                        <td className="px-3 py-2 text-right text-gray-700">
+                          ₹{Number(
+                            item.total_taxable_amt || item.taxable_price || item.total_price || 0
+                          ).toLocaleString("en-IN")}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Selection summary */}
+            {selectedCount > 0 && (
+              <p className="text-sm text-orange-700 font-medium mb-4">
+                {selectedCount} product{selectedCount > 1 ? "s" : ""} selected for return
+              </p>
+            )}
+
+            {/* Footer */}
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setOpen(false)}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateCreditNote}
+                disabled={submitting || selectedCount === 0 || loadingItems}
+                className="px-5 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+              >
+                {submitting ? "Creating…" : "Create Credit Note"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ActionButtons({ r, userRole, isOpen, toggleMenu }) {
+  const popRef = useRef(null);
+  const [bookingProductSelectOpen, setBookingProductSelectOpen] = useState(false);
+  // const [photosOpen, setPhotosOpen] = useState(false);
+  const role = (userRole || "").toString().trim().toLowerCase();
+  const canViewSales = [
+    "back office",
+    "accountant",
+    "admin",
+    "superadmin",
+    "sales",
+    "sales head",
+    "team leader",
+    "gem portal",
+    "warehouse incharge",
+  ].includes(role);
+  const isSuperAdmin = isSuperAdminRole(userRole);
+  const isAdmin = role === "admin";
+  const isAccountant = role.includes("accountant");
+  const canManageReturns = isSuperAdmin;
+  const accountantOnlyMenu = isAccountantOnlyMenuRole(userRole);
+  const canEditBooking = isSuperAdmin || isAdmin;
+  const reportUploaded = isBookingAllowedForOrder(r);
+  const canAdminAfterReport = (isAdmin || isSuperAdmin) && reportUploaded;
+  const canManageInvoiceDocs = isSuperAdmin || isAccountant;
+  const isWarehouse = role === "warehouse incharge";
+  const isDirector = role === "director";
+  const isTeamLeader = role === "team leader";
+  const canManageBookingActions =
+    isSuperAdmin ||
+    isAdmin ||
+    canManageReturns ||
+    canAdminAfterReport ||
+    ((isDirector || isTeamLeader || isWarehouse) && reportUploaded);
+  const hasBooking =
+    r.booking_id !== undefined &&
+    r.booking_id !== null &&
+    String(r.booking_id).trim() !== "" &&
+    String(r.booking_id) !== "0";
+  const dispatchStatus = Number(r.dispatch_status);
+  const hasDispatchedStock = orderHasDispatchedStock(r);
+  const canOpenDispatch = canOpenDispatchForOrder(r);
+  const remainDispatchRound = isRemainDispatchRound(r);
+  const canViewDispatchPanel = canViewDispatchPanelForOrder(r);
+  // const canViewDispatchPhotos = [
+  //   "warehouse incharge",
+  //   "superadmin",
+  //   "team leader",
+  //   "admin",
+  //   "director",
+  //   "accountant",
+  // ].includes(role) || role.includes("accountant");
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onClick = (e) => {
+      if (!popRef.current) return;
+      if (
+        e.target.closest("a") ||
+        e.target.closest("button") ||
+        e.target.closest('[role="dialog"]') ||
+        e.target.closest(".fixed.inset-0")
+      ) {
+        return;
+      }
+      if (!popRef.current.contains(e.target)) {
+        toggleMenu();
+      }
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("touchstart", onClick);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("touchstart", onClick);
+    };
+  }, [isOpen, toggleMenu]);
+
+  if (r.is_cancelled) {
+    return null;
+  }
+
+  return (
+    <div className="relative inline-block text-left">
+      {/* View Dispatch Photos — hidden on admin order list
+      {photosOpen && (
+        <DispatchPhotosModal
+          orderId={r.order_id}
+          onClose={() => setPhotosOpen(false)}
+        />
+      )}
+      */}
+      <button
+        onClick={toggleMenu}
+        className="p-2 rounded-full hover:bg-gray-200 transition-colors duration-150"
+        title="Show actions"
+      >
+        <MoreVertical size={18} />
+      </button>
+      <DispatchProductSelectModal
+        open={bookingProductSelectOpen}
+        orderId={r.order_id}
+        nextHref={`/admin-dashboard/order/upload-booking/${r.order_id}`}
+        onClose={() => setBookingProductSelectOpen(false)}
+        title={
+          canCreateFollowUpBooking(r)
+            ? "Select remaining products for booking"
+            : "Select products for booking"
+        }
+        confirmLabel="Continue to booking"
+        partialHint="Partial Dispatch"
+      />
+      {isOpen && (
+        <div
+          ref={popRef}
+          className="absolute right-0 mt-2 w-56 max-w-[calc(100vw-2rem)] origin-top-right rounded-lg bg-white shadow-lg ring-1 ring-black/5 z-20 border"
+        >
+          <div className="py-1 text-sm">
+            {accountantOnlyMenu ? (
+              <>
+                <AccountantReportActionLinks
+                  order={r}
+                  viewSalesHref={`/admin-dashboard/order/${r.order_id}`}
+                  uploadHref={`/admin-dashboard/order/upload/${r.order_id}`}
+                  viewHref={`/admin-dashboard/order/view/${r.order_id}`}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <OrderBookingViewMenuLinks
+                  order={r}
+                  basePath="/admin-dashboard/order"
+                  canSee={hasBooking}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <OrderInvoiceMenuLinks
+                  order={r}
+                  invoicesBasePath="/admin-dashboard/invoices"
+                  onClick={(e) => e.stopPropagation()}
+                />
+                {r.report_file && (
+                  <div className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                    <EditPaymentButton order={r} />
+                  </div>
+                )}
+                {canViewDispatchPanel && (
+                  <Link
+                    href={`/admin-dashboard/order/dispatch/view/${r.order_id}`}
+                    className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                    title="View Dispatch"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Search size={16} />
+                    <span>View Dispatch</span>
+                  </Link>
+                )}
+                <OrderDeliveryMenuLinks
+                  order={r}
+                  userRole={userRole}
+                  DeliveryMenuItem={UpdateDeliveryMenuItem}
+                />
+                {dispatchStatus === 1 &&
+                  ![1, 2, 3].includes(Number(r.is_returned || 0)) && (
+                    <div
+                      className="border-t border-gray-100 mt-1 pt-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <ReturnInitiateMenuItem order={r} />
+                    </div>
+                  )}
+                <ViewCreditNoteMenuLink
+                  order={r}
+                  userRole={userRole}
+                  hrefBase="/admin-dashboard"
+                  onClick={(e) => e.stopPropagation()}
+                />
+                <AccountantReturnViewMenuItems
+                  order={r}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </>
+            ) : (
+              <>
+            {canViewSales && (
+              <Link
+                href={`/admin-dashboard/order/${r.order_id}`}
+                className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                title="View Sales"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <ClipboardList size={16} />
+                <span>View Sales</span>
+              </Link>
+            )}
+            {canManageInvoiceDocs && (
+              <OrderInvoiceMenuLinks
+                order={r}
+                invoicesBasePath="/admin-dashboard/invoices"
+                onClick={(e) => e.stopPropagation()}
+              />
+            )}
+            {canManageInvoiceDocs &&
+              (r.report_file ? (
+                <>
+                  <Link
+                    href={`/admin-dashboard/order/view/${r.order_id}`}
+                    className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                    title="View Report"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <FileText size={16} />
+                    <span>View Report</span>
+                  </Link>
+                  {isSuperAdmin && dispatchStatus === 0 && (
+                    <Link
+                      href={`/admin-dashboard/order/upload/${r.order_id}`}
+                      className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-blue-700"
+                      title="Edit Report"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Pencil size={16} />
+                      <span>Edit Report</span>
+                    </Link>
+                  )}
+                  {isSuperAdmin && canShowOrderCancelMenu(r) && (
+                    <div
+                      className="border-t border-gray-100 mt-1 pt-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <DeleteButton orderId={r.order_id} />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Link
+                    href={`/admin-dashboard/order/upload/${r.order_id}`}
+                    className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-yellow-700"
+                    title="Upload Report"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <UploadCloud size={16} />
+                    <span>Upload Report</span>
+                  </Link>
+                  <div onClick={(e) => e.stopPropagation()}>
+                    {isSuperAdmin && canShowOrderCancelMenu(r) && (
+                      <DeleteButton orderId={r.order_id} />
+                    )}
+                  </div>
+                </>
+              ))}
+            {canManageBookingActions &&
+              (!hasBooking || canCreateFollowUpBooking(r)) && (
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 px-3 py-2 hover:bg-gray-50 text-green-700 text-left"
+                  title={
+                    canCreateFollowUpBooking(r)
+                      ? "Create booking for remaining products"
+                      : "Create Booking"
+                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setBookingProductSelectOpen(true);
+                    toggleMenu();
+                  }}
+                >
+                  <UploadCloud size={16} />
+                  <span>
+                    {canCreateFollowUpBooking(r)
+                      ? "Create Booking (Remaining)"
+                      : "Create Booking"}
+                  </span>
+                </button>
+              )}
+            {canEditBooking &&
+              hasBooking &&
+              !canCreateFollowUpBooking(r) &&
+              !orderHasDispatchedStock(r) &&
+              dispatchStatus !== 1 && (
+                <Link
+                  href={`/admin-dashboard/order/upload-booking/${r.order_id}`}
+                  className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-blue-700"
+                  title="Edit Booking"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Pencil size={16} />
+                  <span>Edit Booking</span>
+                </Link>
+              )}
+            <OrderBookingViewMenuLinks
+              order={r}
+              basePath="/admin-dashboard/order"
+              canSee={hasBooking && (canManageReturns || canEditBooking)}
+              onClick={(e) => e.stopPropagation()}
+            />
+            {(isWarehouse ||
+              isSuperAdmin ||
+              isAdmin ||
+              canManageReturns ||
+              canAdminAfterReport) &&
+              canOpenDispatch && (
+                <>
+                  <Link
+                    href={`/admin-dashboard/order/dispatch/${r.order_id}`}
+                    className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                    title={
+                      remainDispatchRound
+                        ? "Dispatch remaining products"
+                        : "Dispatch"
+                    }
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <CheckCircle size={16} />
+                    <span>
+                      {remainDispatchRound ? "Dispatch (Remain)" : "Dispatch"}
+                    </span>
+                  </Link>
+                </>
+              )}
+            {/* View Dispatch Photos — hidden on admin order list
+            {dispatchStatus === 1 && canViewDispatchPhotos && (
+              <DispatchPhotosMenuButton
+                orderId={r.order_id}
+                onOpen={() => setPhotosOpen(true)}
+              />
+            )}
+            */}
+            {(isWarehouse ||
+              isSuperAdmin ||
+              isAdmin ||
+              canManageReturns ||
+              canViewSales) &&
+              canViewDispatchPanel && (
+                <>
+                  <Link
+                    href={`/admin-dashboard/order/dispatch/view/${r.order_id}`}
+                    className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-gray-700"
+                    title="View Dispatch"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Search size={16} />
+                    <span>View Dispatch</span>
+                  </Link>
+                </>
+              )}
+            <OrderDeliveryMenuLinks
+              order={r}
+              userRole={userRole}
+              DeliveryMenuItem={UpdateDeliveryMenuItem}
+            />
+            {canManageReturns &&
+              dispatchStatus === 1 &&
+              ![1, 2, 3].includes(Number(r.is_returned || 0)) && (
+              <div className="border-t border-gray-100 mt-1 pt-1" onClick={(e) => e.stopPropagation()}>
+                <ReturnInitiateMenuItem order={r} />
+              </div>
+            )}
+            <ViewCreditNoteMenuLink
+              order={r}
+              userRole={userRole}
+              hrefBase="/admin-dashboard"
+              onClick={(e) => e.stopPropagation()}
+            />
+            {(canManageReturns || isAdmin) && Number(r.is_returned) === 3 && (
+              <div className="border-t border-gray-100 mt-1 pt-1" onClick={(e) => e.stopPropagation()}>
+                <ReturnBookingMenuItem order={r} />
+              </div>
+            )}
+            {(canManageReturns || isAdmin || isAccountant) &&
+              Number(r.return_booking_done) === 1 && (
+              <div className="border-t border-gray-100 mt-1 pt-1" onClick={(e) => e.stopPropagation()}>
+                <ViewReturnBookingMenuItem order={r} />
+              </div>
+            )}
+            {(canManageReturns || isAdmin) &&
+              Number(r.is_returned) === 3 &&
+              Number(r.return_booking_done) === 1 &&
+              Number(r.warehouse_in_done) !== 1 && (
+              <div className="border-t border-gray-100 mt-1 pt-1" onClick={(e) => e.stopPropagation()}>
+                <WarehouseInMenuItem order={r} />
+              </div>
+            )}
+            {(canManageReturns || isAdmin || isAccountant) &&
+              Number(r.warehouse_in_done) === 1 && (
+              <div className="border-t border-gray-100 mt-1 pt-1" onClick={(e) => e.stopPropagation()}>
+                <WarehouseInMenuItem order={r} />
+              </div>
+            )}
+            {isSuperAdmin && (
+              <div className="border-t border-gray-100 mt-1 pt-1">
+                <DeletePermanentlyButton orderId={r.order_id} onDeleted={toggleMenu} />
+              </div>
+            )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeletePermanentlyButton({ orderId, onDeleted }) {
+  const router = useRouter();
+  const [showModal, setShowModal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    try {
+      setDeleting(true);
+      const res = await fetch("/api/delete-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setShowModal(false);
+        onDeleted?.();
+        router.refresh();
+      } else {
+        alert(json.error || "Delete failed");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to delete order");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <>
+      {/* <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setShowModal(true);
+        }}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-red-50 text-red-600 text-left"
+        title="Delete permanently from database"
+      >
+        <Trash2 size={16} />
+        <span>Delete Permanently</span>
+      </button> */}
+      {showModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={(e) => e.target === e.currentTarget && setShowModal(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="font-semibold text-red-600 mb-2">Delete Permanently</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Order <strong>{orderId}</strong> will be permanently deleted from the database. This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowModal(false)}
+                className="px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="px-3 py-1.5 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 text-sm"
+              >
+                {deleting ? "Deleting..." : "Yes, Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function EditPaymentButton({ order }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    payment_id: order.payment_id || "",
+    payment_date: "",
+    payment_amount: "",
+    payment_status: order.payment_status || "",
+  });
+  const [status, setStatus] = useState(order.payment_status || "");
+  const totalamt = getTotalAmount(order);
+
+  const rows = buildOrderPaymentRows(order);
+
+  const formatPrevDate = (d) => {
+    if (!d) return "-";
+    const v = dayjs(d);
+    return v.isValid() ? v.format("DD-MM-YYYY") : d;
+  };
+
+  const totalPaid = sumOrderPaymentAmounts(order);
+
+  const onChange = (e) => {
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const save = async () => {
+    try {
+      setSaving(true);
+      const res = await fetch("/api/orders/payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          payment_id: form.payment_id || null,
+          payment_date: form.payment_date || null,
+          payment_amount:
+            form.payment_amount === "" ? null : Number(form.payment_amount),
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success)
+        throw new Error(json.error || "Save failed");
+      setStatus(json.payment_status);
+      setForm((prev) => ({ ...prev, payment_status: json.payment_status }));
+      setOpen(false);
+      router.refresh();
+    } catch (e) {
+      console.error(e);
+      alert(e.message || "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const isPaid =
+    (order.payment_status || "")
+      .toString()
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "") === "paid";
+
+  return (
+    <>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
+        className="inline-flex items-center justify-center px-2 py-1 rounded bg-purple-50 text-purple-700 hover:bg-purple-100 text-xs"
+        title={isPaid ? "View Payment" : "Edit Payment"}
+      >
+        {isPaid ? "View Payment" : "Edit Payment"}
+      </button>
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-lg shadow-lg p-4 w-full max-w-md">
+            <h3 className="font-semibold mb-3">
+              {isPaid ? "View Payment" : "Edit Payment"}
+            </h3>
+            <p>Total Amount : {totalamt}</p>
+            <div className="space-y-3">
+              <div className="text-xs text-gray-700">
+                <div className="font-medium mb-1">Previous Payments</div>
+                {rows.length ? (
+                  <div className="border rounded">
+                    <div className="grid grid-cols-3 text-gray-600 bg-gray-50 px-2 py-1">
+                      <div>ID</div>
+                      <div>Date</div>
+                      <div className="text-right">Amount</div>
+                    </div>
+                    <div className="max-h-40 overflow-auto">
+                      {rows.map((r, idx) => (
+                        <div
+                          key={idx}
+                          className="grid grid-cols-3 px-2 py-1 border-t"
+                        >
+                          <div className="truncate" title={r.id}>
+                            {r.id || "-"}
+                          </div>
+                          <div>{formatPrevDate(r.date)}</div>
+                          <div className="text-right">{r.amount || "-"}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-3 px-2 py-1 border-t bg-gray-50">
+                      <div className="col-span-2 font-medium">Total Paid</div>
+                      <div className="text-right font-semibold">
+                        {totalPaid}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-gray-500">No previous payments</div>
+                )}
+              </div>
+              {!isPaid && (
+                <>
+                  <Input
+                    label="Payment ID (UTR No)"
+                    name="payment_id"
+                    onChange={onChange}
+                  />
+                  <Input
+                    label="Payment Date"
+                    name="payment_date"
+                    type="date"
+                    onChange={onChange}
+                  />
+                  <Input
+                    label="Payment Amount"
+                    name="payment_amount"
+                    type="number"
+                    onChange={onChange}
+                  />
+                </>
+              )}
+              <div className="text-sm text-gray-600">
+                Status:{" "}
+                <span className="font-medium">
+                  {form.payment_status || "-"}
+                </span>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setOpen(false)}
+                className="px-3 py-1 rounded border"
+              >
+                {isPaid ? "Close" : "Cancel"}
+              </button>
+              {!isPaid && (
+                <button
+                  onClick={save}
+                  disabled={saving}
+                  className="px-3 py-1 rounded bg-purple-600 text-white disabled:opacity-50"
+                >
+                  {saving ? "Saving..." : "Save"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Input({ label, name, value, onChange, type = "text" }) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <input
+        name={name}
+        type={type}
+        value={value}
+        onChange={onChange}
+        className="w-full border rounded px-2 py-1 text-sm"
+      />
+    </div>
+  );
+}
+
+function UpdateDeliveryMenuItem({ order, userRole, variant = "auto" }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [deliveredOn, setDeliveredOn] = useState("");
+  const [deliveryProof, setDeliveryProof] = useState(null);
+  const [deliveryRemark, setDeliveryRemark] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const canViewDeliveryDetails = canViewOrderDeliveryDetailsRole(userRole);
+  const superAdmin = isSuperAdminRole(userRole);
+  const canManageAnyDelivery = canManageAnyOrderDeliveryRole(userRole);
+
+  // Fetch current user
+  useEffect(() => {
+    const fetchUser = async () => {
+      try {
+        const res = await fetch("/api/me");
+        if (res.ok) {
+          const data = await res.json();
+          setCurrentUser(data.username);
+        }
+      } catch (error) {
+        console.error("Error fetching user:", error);
+      }
+    };
+    fetchUser();
+  }, []);
+
+  const isFullyDelivered = isOrderFullyDelivered(order);
+  const hasDeliveryRecord = orderHasDeliveryRecord(order);
+  const canUpdateDeliveryProof = canEditDeliveryProof(order);
+
+  // Check if menu item should be shown
+  const shouldShow = () => {
+    if (!canShowOrderDeliveryActions(order)) return false;
+
+    if (superAdmin || canManageAnyDelivery) return true;
+
+    if (canViewDeliveryDetails) {
+      return hasDeliveryRecord;
+    }
+
+    if (!currentUser || order.booking_by !== currentUser) return false;
+    return true;
+  };
+
+  const viewOnly =
+    !superAdmin &&
+    !canManageAnyDelivery &&
+    canViewDeliveryDetails &&
+    hasDeliveryRecord;
+
+  const uploadDeliveryProofFile = async () => {
+    if (!deliveryProof) return null;
+    setUploading(true);
+    const formData = new FormData();
+    formData.append("file", deliveryProof);
+    const uploadRes = await fetch("/api/upload-delivery-proof", {
+      method: "POST",
+      body: formData,
+    });
+    setUploading(false);
+    if (!uploadRes.ok) {
+      throw new Error("Failed to upload delivery proof");
+    }
+    const uploadJson = await uploadRes.json();
+    return uploadJson.url;
+  };
+
+  const handleSave = async () => {
+    if (!deliveredOn) {
+      alert("Please select delivery date");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      const deliveryProofUrl = await uploadDeliveryProofFile();
+
+      const res = await fetch("/api/orders/delivery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          delivered_on: deliveredOn,
+          delivery_proof: deliveryProofUrl,
+          delivery_remark: deliveryRemark,
+        }),
+      });
+
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || "Failed to update delivery status");
+      }
+
+      alert("Delivery status updated successfully!");
+      setOpen(false);
+      router.refresh();
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Failed to update delivery status");
+    } finally {
+      setSaving(false);
+      setUploading(false);
+    }
+  };
+
+  const handleUpdateProof = async () => {
+    if (!deliveryProof) {
+      alert("Please select a delivery proof file");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      const deliveryProofUrl = await uploadDeliveryProofFile();
+
+      const res = await fetch("/api/orders/delivery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          delivery_proof: deliveryProofUrl,
+          update_proof_only: true,
+        }),
+      });
+
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || "Failed to update delivery proof");
+      }
+
+      alert("Delivery proof updated successfully!");
+      setOpen(false);
+      setDeliveryProof(null);
+      router.refresh();
+    } catch (error) {
+      console.error(error);
+      alert(error.message || "Failed to update delivery proof");
+    } finally {
+      setSaving(false);
+      setUploading(false);
+    }
+  };
+
+  if (variant === "view_first") {
+    if (!canShowOrderDeliveryActions(order) || !hasDeliveryRecord) return null;
+  } else if (variant === "view_remain") {
+    if (
+      !canShowOrderDeliveryActions(order) ||
+      !orderHasSecondDeliveryBatch(order)
+    ) {
+      return null;
+    }
+  } else if (variant === "update_remain") {
+    if (
+      !canShowOrderDeliveryActions(order) ||
+      isFullyDelivered ||
+      !hasDeliveryRecord
+    ) {
+      return null;
+    }
+  } else if (variant === "view") {
+    if (!canShowOrderDeliveryActions(order) || !hasDeliveryRecord) return null;
+  } else if (variant === "update") {
+    if (!canShowOrderDeliveryActions(order) || isFullyDelivered) return null;
+  } else if (!shouldShow()) {
+    return null;
+  }
+
+  const batchForModal =
+    variant === "view_first"
+      ? getDeliveryBatchForView(order, "first")
+      : variant === "view_remain"
+        ? getDeliveryBatchForView(order, "remain")
+        : null;
+  const displayOrder = batchForModal
+    ? {
+        ...order,
+        delivered_on: batchForModal.delivered_on,
+        delivery_proof: batchForModal.delivery_proof,
+        delivery_remark: batchForModal.delivery_remark,
+      }
+    : order;
+
+  const readOnlyDeliveryModal =
+    variant === "view_first" ||
+    variant === "view_remain" ||
+    variant === "view" ||
+    (variant === "auto" && (viewOnly || isFullyDelivered));
+
+  const menuLabel =
+    variant === "view_first"
+      ? "View Delivery"
+      : variant === "view_remain"
+        ? "View Delivery (Remain)"
+        : variant === "update_remain"
+          ? "Update Delivery (Remain)"
+          : variant === "update"
+            ? "Update Delivery"
+            : readOnlyDeliveryModal
+              ? "View Delivery"
+              : "Update Delivery";
+
+  const formatDate = (d) => {
+    if (!d) return "-";
+    const date = new Date(d);
+    return isNaN(date) ? d : date.toLocaleDateString("en-IN");
+  };
+
+  return (
+    <>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-blue-700 text-left"
+        title={readOnlyDeliveryModal ? "View Delivery" : "Update Delivery Status"}
+      >
+        <Truck size={16} />
+        <span>{menuLabel}</span>
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            className="bg-white rounded-lg shadow-lg p-6 w-full max-w-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold mb-4">
+              {readOnlyDeliveryModal
+                ? variant === "view_remain"
+                  ? "Delivery Details (Remain)"
+                  : "Delivery Details"
+                : variant === "update_remain"
+                  ? "Update Delivery (Remain)"
+                  : "Update Delivery Status"}
+            </h3>
+
+            <div className="space-y-4">
+              <div>
+                <p className="text-sm text-gray-600">
+                  Order ID:{" "}
+                  <span className="font-medium text-gray-800">
+                    {order.order_id}
+                  </span>
+                </p>
+                <p className="text-sm text-gray-600">
+                  Client:{" "}
+                  <span className="font-medium text-gray-800">
+                    {order.client_name}
+                  </span>
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  Expected Delivery Date:
+                </label>
+                <p className="text-sm font-medium text-gray-800">
+                  {formatDate(order.delivery_date)}
+                </p>
+              </div>
+
+              {readOnlyDeliveryModal ? (
+                <>
+                  <div>
+                    <label className="block text-sm text-gray-700 font-medium mb-1">
+                      Actual Delivery Date:
+                    </label>
+                    <p className="text-sm font-medium text-gray-800">
+                      {formatDate(displayOrder.delivered_on)}
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-700 font-medium mb-1">
+                      Delivery Proof:
+                    </label>
+                    {displayOrder.delivery_proof ? (
+                      <div className="flex gap-3">
+                        <a
+                          href={displayOrder.delivery_proof}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-sm font-medium transition"
+                        >
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                            />
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                            />
+                          </svg>
+                          View
+                        </a>
+                        <a
+                          href={displayOrder.delivery_proof}
+                          download
+                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-green-50 text-green-700 rounded-lg hover:bg-green-100 text-sm font-medium transition"
+                        >
+                          <svg
+                            className="w-4 h-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                            />
+                          </svg>
+                          Download
+                        </a>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-gray-500 italic">
+                        No delivery proof uploaded
+                      </p>
+                    )}
+                    {canUpdateDeliveryProof && !viewOnly && (
+                      <div className="mt-3">
+                        <label className="block text-sm text-gray-700 font-medium mb-1">
+                          {displayOrder.delivery_proof
+                            ? "Replace Delivery Proof"
+                            : "Upload Delivery Proof"}
+                        </label>
+                        <input
+                          type="file"
+                          accept="image/*,application/pdf"
+                          onChange={(e) =>
+                            setDeliveryProof(e.target.files?.[0] || null)
+                          }
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        />
+                        {deliveryProof && (
+                          <p className="text-xs text-gray-600 mt-1">
+                            Selected: {deliveryProof.name}
+                          </p>
+                        )}
+                        <p className="text-xs text-amber-700 mt-1">
+                          Editable within 24 hours of delivery
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-700 font-medium mb-1">
+                      Delivery Remark:
+                    </label>
+                    {displayOrder.delivery_remark ? (
+                      <p className="text-sm text-gray-800 bg-gray-50 p-2 rounded">
+                        {displayOrder.delivery_remark}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-gray-500 italic">
+                        No remark provided
+                      </p>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm text-gray-700 font-medium mb-1">
+                      Actual Delivery Date *
+                    </label>
+                    <TypeableDateFilterInput value={deliveredOn} onChange={setDeliveredOn} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      required/>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-700 font-medium mb-1">
+                      Delivery Proof (Optional)
+                    </label>
+                    <input
+                      type="file"
+                      accept="image/*,application/pdf"
+                      onChange={(e) => setDeliveryProof(e.target.files[0])}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    {deliveryProof && (
+                      <p className="text-xs text-gray-600 mt-1">
+                        Selected: {deliveryProof.name}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-gray-700 font-medium mb-1">
+                      Delivery Remark (Optional)
+                    </label>
+                    <textarea
+                      value={deliveryRemark}
+                      onChange={(e) => setDeliveryRemark(e.target.value)}
+                      placeholder="Enter any remarks about the delivery..."
+                      maxLength="500"
+                      rows="3"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      {deliveryRemark.length}/500 characters
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => setOpen(false)}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium"
+              >
+                {readOnlyDeliveryModal ? "Close" : "Cancel"}
+              </button>
+              {!readOnlyDeliveryModal && (
+                <button
+                  onClick={handleSave}
+                  disabled={saving || uploading}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                >
+                  {uploading
+                    ? "Uploading..."
+                    : saving
+                    ? "Saving..."
+                    : "Mark as Delivered"}
+                </button>
+              )}
+              {readOnlyDeliveryModal && canUpdateDeliveryProof && !viewOnly && (
+                <button
+                  onClick={handleUpdateProof}
+                  disabled={saving || uploading || !deliveryProof}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                >
+                  {uploading
+                    ? "Uploading..."
+                    : saving
+                    ? "Saving..."
+                    : "Update Proof"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function canRevertOrder(dispatchStatus) {
+  const s = Number(dispatchStatus);
+  return s !== 1 && s !== 2;
+}
+
+/** Order Cancel: allowed through booking done; hidden once dispatch starts or later. */
+function canShowOrderCancelMenu(order) {
+  if (!order || order.is_cancelled) return false;
+  const dispatch = Number(order.dispatch_status);
+  if (dispatch === 1 || dispatch === 2) return false;
+  if (order.installation_status) return false;
+  if (Number(order.is_returned || 0) !== 0) return false;
+  if (isOrderFullyDelivered(order) || isOrderPartialDelivery(order)) return false;
+  if (orderHasDispatchedStock(order)) return false;
+  return true;
+}
+
+function WarehouseInMenuItem({ order }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
+  const [image, setImage] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const isDone = Number(order.warehouse_in_done) === 1;
+
+  const fmtDate = (d) => {
+    if (!d) return "-";
+    return new Date(d).toLocaleDateString("en-IN");
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!image) { setError("Please upload warehouse-in image."); return; }
+    setError(""); setSubmitting(true);
+    try {
+      const fd = new FormData();
+      fd.append("order_id", order.order_id);
+      fd.append("warehouse_in_date", date);
+      fd.append("image", image);
+      const res = await fetch("/api/orders/warehouse-in", { method: "POST", body: fd });
+      const json = await res.json();
+      if (json.success) {
+        setSuccess("✅ Warehouse-In done! Stock updated.");
+        setTimeout(() => { setOpen(false); setSuccess(""); router.refresh(); }, 1500);
+      } else {
+        setError(json.error || "Failed to process warehouse-in.");
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Something went wrong.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+        className={`flex items-center gap-2 w-full px-3 py-2 hover:bg-gray-50 text-sm ${isDone ? "text-blue-700" : "text-green-700"}`}
+      >
+        {isDone ? <FileCheck size={16} /> : <PackageCheck size={16} />}
+        <span>{isDone ? "View Warehouse-In" : "Warehouse In"}</span>
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-full max-w-md"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <h2 className="text-xl font-bold mb-4 text-center">
+                {isDone ? "View Warehouse-In" : "Warehouse In"}
+              </h2>
+              <table className="w-full mb-4 text-sm border">
+                <tbody>
+                  {[
+                    ["Order ID", order.order_id],
+                    ["Client", order.client_name],
+                    ["Booking Ref", order.return_booking_ref || "-"],
+                  ].map(([label, value]) => (
+                    <tr key={label} className="border">
+                      <td className="p-2 font-medium bg-gray-50 w-2/5">{label}</td>
+                      <td className="p-2">{value}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {isDone ? (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <p className="text-xs text-gray-500 mb-1">Date</p>
+                      <p className="font-medium text-gray-800">{fmtDate(order.warehouse_in_date)}</p>
+                    </div>
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <p className="text-xs text-gray-500 mb-1">Done By</p>
+                      <p className="font-medium text-gray-800">{order.warehouse_in_by || "-"}</p>
+                    </div>
+                  </div>
+                  {order.warehouse_in_image ? (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-gray-700">Proof Image</p>
+                      <a
+                        href={order.warehouse_in_image}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="block rounded-lg overflow-hidden border border-gray-200"
+                      >
+                        <img
+                          src={order.warehouse_in_image}
+                          alt="Warehouse-In proof"
+                          className="w-full h-52 object-cover"
+                        />
+                      </a>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-500 italic">No image uploaded</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setOpen(false)}
+                    className="w-full border border-gray-300 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleSubmit} className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Warehouse In Date</label>
+                    <TypeableDateFilterInput value={date} onChange={setDate} required
+                      className="w-full border px-3 py-2 rounded-md"/>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Upload Image <span className="text-red-500">*</span></label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setImage(e.target.files[0] || null)}
+                      required
+                      className="w-full border px-3 py-2 rounded-md text-sm"
+                    />
+                  </div>
+                  {error && <p className="text-red-600 font-medium">{error}</p>}
+                  {success && <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md font-bold">{success}</div>}
+                  <div className="flex gap-3">
+                    <button type="button" onClick={() => setOpen(false)} className="flex-1 border border-gray-300 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-50">Cancel</button>
+                    <button type="submit" disabled={submitting} className={`flex-1 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}>
+                      {submitting ? "Processing..." : "Confirm Warehouse In"}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ReturnBookingMenuItem({ order }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [formData, setFormData] = useState({
+    return_booking_id: "",
+    return_booking_date: "",
+    expected_pickup_date: "",
+    return_booking_url: "",
+    return_booking_remarks: "",
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const hasReturnBooking = Number(order.return_booking_done) === 1;
+
+  // If booking already done → show "View Return Booking" details instead
+  if (hasReturnBooking) {
+    return (
+      <>
+        <button
+          onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+          className="flex items-center gap-2 w-full px-3 py-2 hover:bg-gray-50 text-indigo-700 text-sm"
+        >
+          <FileText size={16} />
+          <span>View Return Booking</span>
+        </button>
+        {open && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            onClick={() => setOpen(false)}
+          >
+            <div
+              className="bg-white rounded-lg shadow-xl w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-6">
+                <h2 className="text-xl font-bold mb-4 text-center">Return Booking Details</h2>
+                <table className="w-full text-sm border">
+                  <tbody>
+                    {[
+                      ["Order ID", order.order_id],
+                      ["Booking Ref ID", order.return_booking_ref || "-"],
+                      ["Booking Date", order.return_booking_date ? new Date(order.return_booking_date).toLocaleDateString("en-IN") : "-"],
+                      ["Expected Pickup Date", order.expected_pickup_date ? new Date(order.expected_pickup_date).toLocaleDateString("en-IN") : "-"],
+                      ["Booking URL", order.return_booking_url || "-"],
+                      ["Remarks", order.return_booking_remarks || "-"],
+                      ["Booked By", order.return_booking_by || "-"],
+                    ].map(([label, value]) => (
+                      <tr key={label} className="border">
+                        <td className="p-2 font-medium w-2/5 bg-gray-50">{label}</td>
+                        <td className="p-2 break-all">{value}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <button
+                  onClick={() => setOpen(false)}
+                  className="mt-4 w-full border border-gray-300 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setSuccess("");
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/orders/return-booking", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          return_booking_id: formData.return_booking_id,
+          return_booking_date: formData.return_booking_date,
+          expected_pickup_date: formData.expected_pickup_date,
+          return_booking_url: formData.return_booking_url,
+          return_booking_remarks: formData.return_booking_remarks,
+        }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setSuccess("✅ Return booking created successfully!");
+        setTimeout(() => {
+          setOpen(false);
+          setSuccess("");
+          setFormData({ return_booking_id: "", return_booking_date: "", expected_pickup_date: "", return_booking_url: "", return_booking_remarks: "" });
+          router.refresh();
+        }, 1500);
+      } else {
+        setError(json.error || "Failed to create return booking.");
+      }
+    } catch (err) {
+      console.error(err);
+      setError("Something went wrong.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+        className="flex items-center gap-2 w-full px-3 py-2 hover:bg-gray-50 text-blue-700 text-sm"
+      >
+        <UploadCloud size={16} />
+        <span>Return Booking</span>
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <h1 className="text-2xl font-bold mb-6 text-center">Return Booking</h1>
+
+              {/* Order info table */}
+              <table className="w-full mb-6 text-sm border">
+                <tbody>
+                  {[
+                    ["Order ID", order.order_id],
+                    ["Client Name", order.client_name],
+                    ["Contact", order.contact],
+                    ["Email", order.email],
+                    ["Delivery Location", order.delivery_location],
+                    ["Client Delivery Date", order.client_delivery_date
+                      ? new Date(order.client_delivery_date).toLocaleDateString("en-IN")
+                      : "-"],
+                  ].map(([label, value]) => (
+                    <tr key={label} className="border">
+                      <td className="p-2 font-medium w-1/3 bg-gray-50">{label}</td>
+                      <td className="p-2">{value || "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <input
+                  type="text"
+                  name="return_booking_id"
+                  value={formData.return_booking_id}
+                  onChange={handleChange}
+                  required
+                  placeholder="Return Booking ID"
+                  className="w-full border px-3 py-2 rounded-md"
+                />
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Return Booking Date</label>
+                  <TypeableDateFilterInput value={formData.return_booking_date} onChange={(v) => handleChange({ target: { name: "return_booking_date", value: v } })} required
+                    className="mt-1 w-full border px-3 py-2 rounded-md"/>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Expected Pickup Date</label>
+                  <TypeableDateFilterInput value={formData.expected_pickup_date} onChange={(v) => handleChange({ target: { name: "expected_pickup_date", value: v } })} required
+                    className="mt-1 w-full border px-3 py-2 rounded-md"/>
+                </div>
+
+                <input
+                  type="text"
+                  name="return_booking_url"
+                  value={formData.return_booking_url}
+                  onChange={handleChange}
+                  placeholder="Booking URL (optional)"
+                  className="w-full border px-3 py-2 rounded-md"
+                />
+
+                <textarea
+                  name="return_booking_remarks"
+                  value={formData.return_booking_remarks}
+                  onChange={handleChange}
+                  placeholder="Remark *"
+                  required
+                  className="w-full border px-3 py-2 rounded-md"
+                  rows={3}
+                />
+
+                {error && <p className="text-red-600 font-bold">{error}</p>}
+                {success && (
+                  <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md font-bold">
+                    {success}
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setOpen(false)}
+                    className="flex-1 border border-gray-300 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className={`flex-1 bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-md ${submitting ? "opacity-50 cursor-not-allowed" : ""}`}
+                  >
+                    {submitting ? "Uploading..." : "Upload Booking"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ApprovalActions({ r, userRole }) {
+  const router = useRouter();
+  const [loading, setLoading] = useState(false);
+  const [modalAction, setModalAction] = useState(null); // 'approve' | 'reject'
+  const [remark, setRemark] = useState("");
+  const isSuperAdmin =
+    (userRole || "").toString().trim().toUpperCase() === "SUPERADMIN";
+  const revertAllowed = canRevertOrder(r.dispatch_status);
+  const savedRemark = getApprovalRemarkText(r);
+
+  const submitAction = async (action, remarkVal) => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/orders/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId: r.order_id,
+          action,
+          remark: remarkVal || undefined,
+        }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        alert(json.message);
+        setModalAction(null);
+        setRemark("");
+        router.refresh();
+      } else {
+        alert(json.error);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Failed to process approval");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAction = async (action) => {
+    if (action === "pending") {
+      if (!revertAllowed) {
+        toast.error("Cannot revert: Order is already dispatched.");
+        return;
+      }
+      if (!confirm("Reset this order to Pending approval?")) return;
+      await submitAction("pending");
+      return;
+    }
+    // For approve/reject, open modal with remark
+    setModalAction(action);
+  };
+
+  const handleModalSubmit = () => {
+    submitAction(modalAction, remark);
+  };
+
+  if (normalizeApprovalStatus(r.approval_status) === "approved") {
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <div
+          className="flex items-center gap-1 text-green-600 font-semibold px-2 py-1 bg-green-50 rounded-lg border border-green-100"
+          title={savedRemark || undefined}
+        >
+          <CheckCircle size={14} />
+          <span>Approved</span>
+          <ApprovalRemarkHover remark={savedRemark} />
+        </div>
+        {isSuperAdmin && revertAllowed && (
+          <button
+            onClick={() => handleAction("pending")}
+            disabled={loading}
+            className="text-xs text-gray-500 hover:text-orange-600 underline"
+            title="Reset to Pending"
+          >
+            Revert
+          </button>
+        )}
+      </div>
+    );
+  }
+  if (normalizeApprovalStatus(r.approval_status) === "rejected") {
+    return (
+      <div className="flex flex-col items-center gap-1">
+        <div
+          className="flex items-center gap-1 text-red-600 font-semibold px-2 py-1 bg-red-50 rounded-lg border border-red-100"
+          title={savedRemark || undefined}
+        >
+          <XCircle size={14} />
+          <span>Rejected</span>
+          <ApprovalRemarkHover remark={savedRemark} />
+        </div>
+        {isSuperAdmin && revertAllowed && (
+          <button
+            onClick={() => handleAction("pending")}
+            disabled={loading}
+            className="text-xs text-gray-500 hover:text-orange-600 underline"
+            title="Reset to Pending"
+          >
+            Revert
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (isSuperAdmin) {
+    return (
+      <>
+        <div className="flex gap-2 justify-center">
+          <button
+            onClick={() => handleAction("approve")}
+            disabled={loading}
+            className="px-2 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200 text-xs font-medium border border-green-200"
+          >
+            Approve
+          </button>
+          <button
+            onClick={() => handleAction("reject")}
+            disabled={loading}
+            className="px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium border border-red-200"
+          >
+            Reject
+          </button>
+        </div>
+        {modalAction && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+            onClick={(e) => e.target === e.currentTarget && setModalAction(null)}
+          >
+            <div
+              className="bg-white rounded-lg shadow-lg p-4 w-full max-w-md mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="font-semibold mb-3 text-gray-800">
+                {modalAction === "approve" ? "Approve Order" : "Reject Order"}
+              </h3>
+              <p className="text-sm text-gray-600 mb-2">
+                Order: <strong>{r.order_id}</strong>
+              </p>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Remark (optional)
+              </label>
+              <textarea
+                value={remark}
+                onChange={(e) => setRemark(e.target.value)}
+                placeholder="Add remark..."
+                rows={3}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  onClick={() => {
+                    setModalAction(null);
+                    setRemark("");
+                  }}
+                  className="px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleModalSubmit}
+                  disabled={loading}
+                  className={`px-3 py-1.5 rounded text-sm font-medium text-white disabled:opacity-50 ${
+                    modalAction === "approve"
+                      ? "bg-green-600 hover:bg-green-700"
+                      : "bg-red-600 hover:bg-red-700"
+                  }`}
+                >
+                  {loading ? "Processing..." : modalAction === "approve" ? "Approve" : "Reject"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <span className="text-orange-600 font-medium italic text-xs">
+      Waiting for Admin
+    </span>
+  );
+}

@@ -1,0 +1,1342 @@
+// lib/getSidebarMenuItems.js users
+import { getSessionPayload } from "./auth";
+import { normalizeRoleKey } from "@/lib/adminAttendanceRulesAuth";
+import {
+  resolveModuleAccess,
+  isModuleKeyAllowed,
+  applySuperadminOnlyModuleRestrictions,
+  applyRoleDenyModuleRestrictions,
+  SUPERADMIN_ONLY_MODULE_KEYS,
+} from "@/lib/moduleAccess";
+import { getDbConnection } from "@/lib/db";
+import {
+  getEmpCrmUserMenuChildrenForRole,
+  isEmpCrmReportingManagerMenuPath,
+} from "@/lib/getEmpCrmUserSidebarMenuItems";
+import { getEmpCrmAdminMenuChildrenForRole } from "@/lib/getEmpCrmAdminSidebarMenuItems";
+import {
+  HR_ADMIN_EMPLOYEE_CRM_MENU_NAME,
+  isHrEmployeeCrmRole,
+  isHrOperationsKeyDuplicatedInAdminEmployeeCrm,
+  toHrEmployeeCrmSidebarItem,
+} from "@/lib/hrEmployeeCrmAccess";
+import { getReportees } from "@/lib/reportingManager";
+import { getRepListUserRole } from "@/lib/repListUserRole";
+
+// Role to dashboard prefix mapping
+function getDashboardPrefix(roleKey) {
+  const role = String(roleKey || "").toUpperCase();
+  if (role === "DIRECTOR") return "/director-dashboard";
+  if (role.includes("SALES")) return "/sales-dashboard";
+  if (role.includes("SERVICE") && role.includes("HEAD")) return "/service-head-dashboard";
+  if (role.includes("HR")) return "/hr-dashboard";
+  if (role.includes("DIGITAL") || role.includes("MARKETER")) return "/digital-marketing-dashboard";
+  if (role.includes("ACCOUNTANT")) return "/accounts-dashboard";
+  return "/user-dashboard"; // Default for other roles
+}
+
+// Transform menu item paths based on role
+function transformMenuItemPaths(item, roleKey) {
+  const dashboardPrefix = getDashboardPrefix(roleKey);
+  const roleUpper = String(roleKey || "").toUpperCase();
+
+  // EA: View Customers → admin-dashboard/customers
+  if (roleUpper === "EA" && item.moduleKey === "view-customers") {
+    return { ...item, path: "/admin-dashboard/customers" };
+  }
+
+  if (roleUpper === "SALES CUM BACKOFFICE" && item.moduleKey === "payment-pending") {
+    return { ...item, path: "/sales-dashboard/reports/payment-pending" };
+  }
+
+  if (roleUpper === "SALES CUM BACKOFFICE" && item.moduleKey === "backlinks-excel-data") {
+    return { ...item, path: "/sales-dashboard/backlinks-excel" };
+  }
+
+  if (dashboardPrefix === "/sales-dashboard" && item.moduleKey) {
+    const salesDashboardModulePaths = {
+      "prospects-view": "/sales-dashboard/prospects",
+      "prospects-add": "/sales-dashboard/prospects/add-manual",
+      "prospects-new": "/sales-dashboard/prospects/new",
+    };
+    if (salesDashboardModulePaths[item.moduleKey]) {
+      return { ...item, path: salesDashboardModulePaths[item.moduleKey] };
+    }
+  }
+
+  if (roleUpper === "DIRECTOR") {
+    const directorModulePaths = {
+      "dashboard-home": "/director-dashboard",
+      "keywords-management": "/director-dashboard/keywords",
+      "backlinks-management": "/director-dashboard/backlinks",
+      "employee-list": "/director-dashboard/employees",
+      "client-expenses": "/director-dashboard/client-expenses/cards",
+      statements: "/director-dashboard/statements",
+      "attendance-rules": "/director-dashboard/attendance-rules",
+      "hr-daily-report": "/director-dashboard/hr-today-report",
+      "all-hr-report": "/director-dashboard/all-hr-report",
+      "paid-leave-ledger": "/director-dashboard/paid-leave-ledger",
+      "prospects-view": "/director-dashboard/prospects",
+      "prospects-add": "/director-dashboard/prospects/add-manual",
+      "prospects-new": "/director-dashboard/prospects/new",
+      "hr-designation-targets": "/director-dashboard/hr-designation-targets",
+      "sales-target": "/director-dashboard/monitor-targets",
+      "import-suppliers": "/director-dashboard/import-crm/suppliers",
+      "import-shipments": "/director-dashboard/import-crm/shipments",
+      "import-agents": "/director-dashboard/import-crm/agents",
+      "import-quote-submissions": "/director-dashboard/import-crm/quote-submissions",
+      "import-award-followups": "/director-dashboard/import-crm/award-followups",
+      "import-billing": "/director-dashboard/import-crm/billing",
+      "gem-crm-bids": "/director-dashboard/gem-crm/bids",
+      "gem-crm-reports": "/director-dashboard/gem-crm/reports",
+      "hiring-process": "/director-dashboard/hiring",
+      "final-profile-approval": "/director-dashboard/final-profile-approval",
+      "salary-slips": "/director-dashboard/salary-slips",
+      "lead-distribution": "/director-dashboard/lead-distribution",
+      "bulk-reassign": "/director-dashboard/bulk-reassign",
+      "prospect-submissions": "/director-dashboard/prospect-submissions",
+    };
+    if (item.moduleKey && directorModulePaths[item.moduleKey]) {
+      return { ...item, path: directorModulePaths[item.moduleKey] };
+    }
+  }
+
+  if (dashboardPrefix === "/hr-dashboard" && item.moduleKey) {
+    const hrDashboardModulePaths = {
+      "employee-list": "/hr-dashboard/employees",
+      "hr-employee-registry": "/hr-dashboard/employees",
+      "hr-admin-employee-crm": "/hr-dashboard/admin-crm",
+      "attendance-rules": "/hr-dashboard/attendance-rules",
+      "hiring-process": "/hr-dashboard/hiring",
+      "salary-slips": "/hr-dashboard/salary-slips",
+      "salary-sheet": "/hr-dashboard/salary-sheet",
+    };
+    if (hrDashboardModulePaths[item.moduleKey]) {
+      const next = { ...item, path: hrDashboardModulePaths[item.moduleKey] };
+      if (item.children?.length) {
+        return {
+          ...next,
+          children: item.children.map((child) =>
+            transformMenuItemPaths(child, roleKey),
+          ),
+        };
+      }
+      return next;
+    }
+  }
+
+  const accountsProcurementPaths = {
+    "purchase-products": "/accounts-dashboard/purchase-products",
+    "delivery-challan": "/accounts-dashboard/delivery-challan",
+  };
+
+  if (roleUpper === "ADMIN") {
+    if (item.moduleKey && accountsProcurementPaths[item.moduleKey]) {
+      return { ...item, path: accountsProcurementPaths[item.moduleKey] };
+    }
+  }
+
+  if (roleUpper === "ACCOUNTANT" || roleUpper.includes("ACCOUNTANT")) {
+    const accountantModulePaths = {
+      invoices: "/user-dashboard/invoices",
+      "client-expenses": "/accounts-dashboard/client-expenses/cards",
+      "delivery-challan": "/accounts-dashboard/delivery-challan",
+      "purchase-products": "/accounts-dashboard/purchase-products",
+      statements: "/accounts-dashboard/statements",
+      "bank-management": "/accounts-dashboard/bank-masters",
+      ledger: "/accounts-dashboard/ledger",
+      parties: "/accounts-dashboard/parties",
+      "paid-leave-ledger": "/accounts-dashboard/paid-leave-ledger",
+      "salary-slips": "/accounts-dashboard/salary-slips",
+      "salary-management": "/accounts-dashboard/salary",
+      "salary-sheet": "/accounts-dashboard/salary-sheet",
+      "attendance-sheet": "/accounts-dashboard/attendance-sheet",
+      "add-paid-leaves": "/accounts-dashboard/add-paid-leave",
+    };
+    if (item.moduleKey && accountantModulePaths[item.moduleKey]) {
+      return { ...item, path: accountantModulePaths[item.moduleKey] };
+    }
+  }
+
+  if (item.moduleKey === "denied-leads") {
+    return { ...item, path: "/sales-dashboard/denied-leads" };
+  }
+
+  // Don't transform admin-dashboard, accounts-dashboard or empcrm paths (same URLs for all roles).
+  if (
+    item.path?.startsWith("/admin-dashboard") ||
+    item.path?.startsWith("/accounts-dashboard") ||
+    item.path?.startsWith("/empcrm")
+  ) {
+    if (item.children?.length) {
+      return {
+        ...item,
+        children: item.children.map((child) => transformMenuItemPaths(child, roleKey)),
+      };
+    }
+    return item;
+  }
+
+  if (item.children?.length) {
+    return {
+      ...item,
+      children: item.children.map((child) => transformMenuItemPaths(child, roleKey)),
+    };
+  }
+
+  // Transform user-dashboard paths to role-specific dashboard
+  if (item.path?.startsWith("/user-dashboard")) {
+    return {
+      ...item,
+      path: item.path.replace("/user-dashboard", dashboardPrefix),
+    };
+  }
+  
+  return item;
+}
+
+function stripSuperadminOnlyMenuItems(items, roleKey) {
+  if (roleKey === "SUPERADMIN" || roleKey === "EA") return items;
+  return (items || [])
+    .map((item) => {
+      if (item?.moduleKey && SUPERADMIN_ONLY_MODULE_KEYS.has(item.moduleKey)) {
+        return null;
+      }
+      if (item?.children?.length) {
+        return { ...item, children: stripSuperadminOnlyMenuItems(item.children, roleKey) };
+      }
+      return item;
+    })
+    .filter(Boolean);
+}
+
+function roleMatches(itemRoles, roleKey) {
+  const roles = Array.isArray(itemRoles) && itemRoles.length > 0 ? itemRoles : ["ALL"];
+  const norm = (r) => normalizeRoleKey(r) || String(r || "").trim().toUpperCase();
+  const wanted = norm(roleKey);
+  return roles.some((r) => {
+    const rr = norm(r);
+    return rr === "ALL" || rr === wanted;
+  });
+}
+
+function filterByRole(list, roleKey) {
+  return (list || [])
+    .map((item) => {
+      const children = item?.children?.length ? filterByRole(item.children, roleKey) : [];
+      const keepSelf = roleMatches(item?.roles, roleKey);
+      if (item?.children?.length) {
+        return children.length > 0 ? { ...item, children } : null;
+      }
+      return keepSelf ? item : null;
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Top-level order mirrors super-admin (`getAdminSidebarMenuItems.js`): Dashboard → TL → Reports →
+ * Leads Management → Activities → Sales → Service → Products → Procurement → Production →
+ * Accounting → Main Expenses → Employees → Employee CRM → HR Operations → Targets → Resource Center.
+ * Paths stay under user CRM (`/user-dashboard`, `/empcrm/...`) except where only an admin route exists.
+ */
+const allMenuItems = [
+  {
+    path: "/user-dashboard",
+    name: "Dashboard",
+    moduleKey: "dashboard-home",
+    roles: ["ALL"],
+    icon: "Home",
+  },
+  {
+    path: "/user-dashboard/tl-customers",
+    name: "TL Management",
+    moduleKey: "tl-customers",
+    /* module_access grants tl-customers; do not limit to TEAM LEADER role only */
+    roles: ["ALL"],
+    icon: "Users",
+  },
+  {
+    name: "Reports",
+    moduleKey: "dashboard",
+    /* Who may see each report is enforced by module_access (Quick Edit); keep role list open so granted keys are not stripped before module filtering. */
+    roles: ["ALL"],
+    icon: "ScrollText",
+    children: [
+      {
+        path: "/user-dashboard/today-reports",
+        name: "Daily Report",
+        moduleKey: "daily-report",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/service-support-report",
+        name: "Service Support Report",
+        moduleKey: "service-support-report",
+        roles: ["ALL"],
+        icon: "Headset",
+      },
+      {
+        path: "/user-dashboard/lead-reports",
+        name: "Lead Reports",
+        moduleKey: "lead-reports",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/quot-report",
+        name: "Quotations Report",
+        moduleKey: "quotations-report",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/order-followups",
+        name: "Order Report",
+        moduleKey: "order-report",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/reports/item-wise-sales",
+        name: "Item Wise Sales",
+        moduleKey: "item-wise-sales",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/reports/customer-payment-behavior",
+        name: "Customer Payment Behavior",
+        moduleKey: "customer-payment-behavior",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+    ],
+  },
+  {
+    name: "Leads Management",
+    moduleKey: "leads-management",
+    /* Visibility driven by module_access; avoid role filter hiding granted keys (same pattern as Reports). */
+    roles: ["ALL"],
+    icon: "Users",
+    children: [
+      {
+        path: "/user-dashboard/add-customer",
+        name: "Add Customer",
+        moduleKey: "add-customer",
+        roles: ["ALL"],
+        icon: "FilePlus2",
+      },
+      {
+        path: "/user-dashboard/customers",
+        name: "View Customers",
+        moduleKey: "view-customers",
+        roles: ["ALL"],
+        icon: "ScrollText",
+      },
+      {
+        path: "/user-dashboard/my-leads",
+        name: "My Leads",
+        moduleKey: "my-leads",
+        roles: ["ALL"],
+        icon: "Upload",
+      },
+      {
+        path: "/user-dashboard/digital-marketer-leads",
+        name: "24h Fresh Leads (DM)",
+        moduleKey: "dm-fresh-leads",
+        roles: ["ALL"],
+        icon: "Clock",
+      },
+      {
+        path: "/admin-dashboard/lead-distribution",
+        name: "Lead Distribution",
+        moduleKey: "lead-distribution",
+        roles: ["ALL"],
+        icon: "ScrollText",
+      },
+      {
+        path: "/admin-dashboard/bulk-reassign",
+        name: "Bulk Reassign Leads",
+        moduleKey: "bulk-reassign",
+        roles: ["ALL"],
+        icon: "Upload",
+      },
+      {
+        path: "/user-dashboard/new_upload",
+        name: "Leads Upload",
+        moduleKey: "leads-upload",
+        roles: ["ALL"],
+        icon: "Upload",
+      },
+      {
+        path: "/admin-dashboard/denied-leads",
+        name: "Denied Leads",
+        moduleKey: "denied-leads",
+        roles: ["ALL"],
+        icon: "ScrollText",
+      },
+    ],
+  },
+  {
+    name: "DM",
+    moduleKey: "digital-marketing",
+    roles: ["ALL"],
+    icon: "FileText",
+    children: [
+      {
+        path: "/user-dashboard/keywords",
+        name: "Keywords",
+        moduleKey: "keywords-management",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/backlinks",
+        name: "Backlinks",
+        moduleKey: "backlinks-management",
+        roles: ["ALL"],
+        icon: "Globe",
+      },
+      {
+        path: "/digital-marketing-dashboard/backlinks-excel",
+        name: "Backlinks Excel",
+        moduleKey: "backlinks-excel-data",
+        roles: ["SUPERADMIN", "DIGITAL MARKETER", "SALES CUM BACKOFFICE"],
+        icon: "FileText",
+      },
+      {
+        path: "/digital-marketing-dashboard/meta-credentials/add",
+        name: "Meta Credentials",
+        moduleKey: "meta-credentials-add",
+        roles: ["DIGITAL MARKETER"],
+        icon: "ShieldCheck",
+      },
+    ],
+  },
+  {
+    name: "Activities",
+    moduleKey: "dashboard",
+    roles: ["ALL"],
+    icon: "ClipboardList",
+    children: [
+      {
+        path: "/user-dashboard/task-manager",
+        name: "Task Manager",
+        moduleKey: "task-manager",
+        roles: ["ALL"],
+        icon: "ClipboardList",
+      },
+      {
+        path: "/user-dashboard/report-data",
+        name: "Fast Card",
+        moduleKey: "fast-card",
+        roles: ["ALL"],
+        icon: "ShieldCheck",
+      },
+      {
+        path: "/user-dashboard/demo-registrations",
+        name: "Demo Followups",
+        moduleKey: "demo-followups",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/prospect-submissions",
+        name: "Prospect Submissions",
+        moduleKey: "prospect-submissions",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/demo_details",
+        name: "Demo Details",
+        moduleKey: "demo-details",
+        roles: [
+          "SALES",
+          "SALES HEAD",
+          "SALES_HEAD",
+          "ADMIN",
+          "SUPERADMIN",
+          "TEAM LEADER",
+          "SERVICE HEAD",
+          "BACK OFFICE",
+          "DIGITAL MARKETER",
+          "GEM PORTAL",
+          "ACCOUNTANT",
+          "WAREHOUSE INCHARGE",
+          "HR",
+        ],
+        icon: "PlayCircle",
+      },
+      {
+        path: "/user-dashboard/schedule-visits",
+        name: "Schedule Visits",
+        moduleKey: "schedule-visits",
+        roles: ["ALL"],
+        icon: "MapPin",
+      },
+    ],
+  },
+  {
+    name: "Sales",
+    moduleKey: "tl-management",
+    /* Visibility driven by module_access; keep role list open so granted keys are not stripped first. */
+    roles: ["ALL"],
+    icon: "FileSignature",
+    children: [
+      {
+        path: "/user-dashboard/quotations",
+        name: "Quotation",
+        moduleKey: "quotations",
+        roles: ["ALL"],
+        icon: "FileSignature",
+      },
+      {
+        path: "/user-dashboard/invoices",
+        name: "Invoices",
+        moduleKey: "invoices",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/performa-invoices",
+        name: "Performa Invoices",
+        moduleKey: "performa-invoices",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/order",
+        name: "Order Process",
+        moduleKey: "orders-process",
+        roles: ["ALL"],
+        icon: "ListOrdered",
+      },
+      {
+        path: "/user-dashboard/order/delivery-status",
+        name: "Delay Delivery",
+        moduleKey: "orders-delay",
+        roles: ["ALL"],
+        icon: "ListOrdered",
+      },
+      {
+        path: "/user-dashboard/estimate-delivery",
+        name: "Estimate Delivery",
+        moduleKey: "estimate-delivery",
+        roles: ["ALL"],
+        icon: "Truck",
+      },
+    ],
+  },
+  {
+    name: "Service & After-Sales",
+    moduleKey: "service-after-sales",
+    roles: ["ALL"],
+    icon: "ShieldCheck",
+    children: [
+      {
+        path: "/user-dashboard/warranty",
+        name: "Register Product",
+        moduleKey: "warranty-console",
+        roles: ["ALL"],
+        icon: "ShieldCheck",
+      },
+      {
+        path: "/user-dashboard/warranty/products",
+        name: "Registered Products",
+        moduleKey: "registered-products",
+        roles: ["ALL"],
+        icon: "ShieldCheck",
+      },
+      {
+        path: "/user-dashboard/service-followups",
+        name: "Machine Follow-ups",
+        moduleKey: "service-followups",
+        roles: ["ALL"],
+        icon: "Calendar",
+      },
+      {
+        path: "/user-dashboard/view_service_reports",
+        name: "Service Records",
+        moduleKey: "service-records",
+        roles: ["ALL"],
+        icon: "BookOpen",
+      },
+      {
+        path: "/user-dashboard/view_service_reports/upcoming-installation",
+        name: "Upcoming Installations",
+        moduleKey: "upcoming-installations",
+        roles: ["ALL"],
+        icon: "BookOpen",
+      },
+      {
+        path: "/user-dashboard/view_service_reports/map",
+        name: "Service Map",
+        moduleKey: "service-map",
+        roles: ["ALL"],
+        icon: "MapPin",
+      },
+      {
+        path: "/user-dashboard/warranty/map",
+        name: "Map View",
+        moduleKey: "warranty-map",
+        roles: ["ALL"],
+        icon: "MapPin",
+      },
+      {
+        path: "/user-dashboard/return-products",
+        name: "Return Products",
+        moduleKey: "return-products",
+        roles: ["ALL"],
+        icon: "RotateCcw",
+      },
+      {
+        path: "/user-dashboard/amc-cmc",
+        name: "AMC/CMC Management",
+        moduleKey: "amc-cmc",
+        roles: ["SERVICE SUPPORT", "ADMIN", "SERVICE HEAD", "EA"],
+        icon: "ClipboardList",
+      },
+      {
+        path: "/user-dashboard/third-party-engineers",
+        name: "Third Party Service Engineers",
+        moduleKey: "third-party-engineers",
+        roles: ["SUPERADMIN", "ADMIN", "SERVICE SUPPORT"],
+        icon: "UserCheck",
+      },
+    ],
+  },
+  {
+    name: "Products & Inventory",
+    moduleKey: "products",
+    /* Visibility driven by module_access; keep role list open so granted keys are not stripped first. */
+    roles: ["ALL"],
+    icon: "Grid3x3",
+    children: [
+      {
+        path: "/user-dashboard/product-stock",
+        name: "Price List",
+        moduleKey: "product-stock",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/product-accessories",
+        name: "Product Accessories",
+        moduleKey: "product-accessories",
+        roles: ["ALL"],
+        icon: "ClipboardList",
+      },
+      {
+        path: "/user-dashboard/spare",
+        name: "Spare Parts",
+        moduleKey: "spare-parts",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+    ],
+  },
+  {
+    name: "Procurement",
+    moduleKey: "products",
+    roles: ["ALL"],
+    icon: "ShoppingCart",
+    children: [
+      {
+        path: "/admin-dashboard/parties",
+        name: "Parties",
+        moduleKey: "parties",
+        roles: ["ALL"],
+        icon: "Users",
+      },
+      {
+        path: "/admin-dashboard/purchase-products",
+        name: "Purchase Billings",
+        moduleKey: "purchase-products",
+        roles: ["ALL"],
+        icon: "ShoppingBag",
+      },
+      {
+        name: "Purchase – Products",
+        moduleKey: "products",
+        roles: ["ALL"],
+        icon: "ShoppingCart",
+        children: [
+          {
+            path: "/user-dashboard/purchase/direct-in",
+            name: "Direct In",
+            moduleKey: "purchase-direct-in",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "PackageCheck",
+          },
+          {
+            path: "/user-dashboard/purchase/generate-request",
+            name: "Generate Request",
+            moduleKey: "purchase-request",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "FilePlus",
+          },
+          {
+            path: "/user-dashboard/purchase/warehouse-in",
+            name: "Warehouse In",
+            moduleKey: "purchase-warehouse-in",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "PackageCheck",
+          },
+          {
+            path: "/user-dashboard/purchase/purchases",
+            name: "Purchases",
+            moduleKey: "purchases",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "ShoppingBag",
+          },
+          {
+            path: "/user-dashboard/purchase/ledger",
+            name: "Purchase Ledger",
+            moduleKey: "purchase-ledger",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "ScrollText",
+          },
+        ],
+      },
+      {
+        name: "Purchase – Spares",
+        moduleKey: "products",
+        roles: ["ALL"],
+        icon: "ShoppingCart",
+        children: [
+          {
+            path: "/user-dashboard/spare/purchase/direct-in",
+            name: "Direct In",
+            moduleKey: "spare-direct-in",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "PackageCheck",
+          },
+          {
+            path: "/user-dashboard/spare/purchase/generate-request",
+            name: "Generate Request",
+            moduleKey: "spare-request",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "FilePlus",
+          },
+          {
+            path: "/user-dashboard/spare/purchase/warehouse-in",
+            name: "Warehouse In",
+            moduleKey: "spare-warehouse-in",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "PackageCheck",
+          },
+          {
+            path: "/user-dashboard/spare/purchase/purchases",
+            name: "Purchases",
+            moduleKey: "spare-purchases",
+            roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "SERVICE SUPPORT"],
+            icon: "ShoppingBag",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    name: "Production",
+    moduleKey: "products",
+    roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "DESIGN ENGINEER", "SERVICE SUPPORT", "PRODUCTION ENGINEER", "MACHINE OPERATOR"],
+    icon: "PackageCheck",
+    children: [
+      {
+        path: "/user-dashboard/productions/status",
+        name: "Production Status",
+        moduleKey: "production-status",
+        roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "DESIGN ENGINEER", "SERVICE SUPPORT", "PRODUCTION ENGINEER", "MACHINE OPERATOR"],
+        icon: "ListOrdered",
+      },
+      {
+        path: "/user-dashboard/productions/bom-list",
+        name: "BOM List",
+        moduleKey: "bom-list",
+        roles: ["ADMIN", "ACCOUNTANT", "WAREHOUSE INCHARGE", "DESIGN ENGINEER", "SERVICE SUPPORT", "PRODUCTION ENGINEER", "MACHINE OPERATOR"],
+        icon: "ClipboardList",
+      },
+    ],
+  },
+  {
+    name: "Accounting",
+    moduleKey: "payments",
+    /* module_access + isSectionAllowed gate visibility (same pattern as Reports / Leads). */
+    roles: ["ALL"],
+    icon: "DollarSign",
+    children: [
+      {
+        path: "/user-dashboard/reports/payment-pending",
+        name: "Payment Pending",
+        moduleKey: "payment-pending",
+        roles: ["ALL"],
+        icon: "DollarSign",
+      },
+      {
+        path: "/user-dashboard/reports/deductions",
+        name: "Deductions",
+        moduleKey: "payment-deductions",
+        roles: ["SUPERADMIN", "ACCOUNTANT"],
+        icon: "List",
+      },
+      {
+        path: "/user-dashboard/expenses",
+        name: "Expense",
+        moduleKey: "expenses",
+        roles: ["ALL"],
+        icon: "DollarSign",
+      },
+      {
+        path: "/user-dashboard/all-expenses",
+        name: "View Expenses",
+        moduleKey: "view-expenses",
+        roles: ["ALL"],
+        icon: "DollarSign",
+      },
+      {
+        path: "/user-dashboard/manual-payments",
+        name: "Manual Payments",
+        moduleKey: "manual-payments",
+        roles: ["ALL"],
+        icon: "Receipt",
+      },
+      {
+        path: "/user-dashboard/dd-management",
+        name: "DD Management",
+        moduleKey: "dd-management",
+        roles: ["ALL"],
+        icon: "DollarSign",
+      },
+      {
+        path: "/accounts-dashboard/other-income",
+        name: "Other Income",
+        moduleKey: "other-income",
+        roles: ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
+        icon: "TrendingUp",
+      },
+      {
+        path: "/admin-dashboard/import-crm/billing",
+        name: "Billing",
+        moduleKey: "import-billing",
+        roles: ["ALL"],
+        icon: "Receipt",
+      },
+      {
+        path: "/admin-dashboard/ledger",
+        name: "Ledger",
+        moduleKey: "ledger",
+        roles: ["ALL"],
+        icon: "BookOpen",
+      },
+    ],
+  },
+  {
+    name: "Main Expenses",
+    moduleKey: "tally-payments",
+    /* Visibility driven by module_access; keep role list open so granted keys are not stripped first. */
+    roles: ["ALL"],
+    icon: "Receipt",
+    children: [
+      {
+        path: "/admin-dashboard/client-expenses/cards",
+        name: "Main Expenses",
+        moduleKey: "client-expenses",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/admin-dashboard/delivery-challan",
+        name: "Delivery Challan",
+        moduleKey: "delivery-challan",
+        roles: ["ALL"],
+        icon: "Package",
+      },
+      {
+        path: "/admin-dashboard/statements",
+        name: "Statement",
+        moduleKey: "statements",
+        roles: ["ALL"],
+        icon: "Receipt",
+      },
+      {
+        path: "/admin-dashboard/bank-masters",
+        name: "Bank Management",
+        moduleKey: "bank-management",
+        roles: ["ALL"],
+        icon: "Landmark",
+      },
+    ],
+  },
+  {
+    name: "Employees",
+    moduleKey: "employee",
+    roles: [
+      "HR",
+      "HR HEAD",
+      "HR EXECUTIVE",
+      "JUNIOR HR EXECUTIVE",
+      "HR RECRUITER",
+    ],
+    icon: "User",
+    children: [
+      {
+        path: "/hr-dashboard/employees",
+        name: "Employees",
+        moduleKey: "hr-employee-registry",
+        roles: [
+          "HR",
+          "HR HEAD",
+          "HR EXECUTIVE",
+          "JUNIOR HR EXECUTIVE",
+          "HR RECRUITER",
+        ],
+        icon: "UserPlus",
+      },
+    ],
+  },
+  {
+    name: HR_ADMIN_EMPLOYEE_CRM_MENU_NAME,
+    moduleKey: "hr-admin-employee-crm",
+    path: "/hr-dashboard/admin-crm",
+    roles: [
+      "HR",
+      "HR HEAD",
+      "HR EXECUTIVE",
+      "JUNIOR HR EXECUTIVE",
+      "HR RECRUITER",
+    ],
+    icon: "LayoutGrid",
+    children: [],
+  },
+  {
+    name: "Employee CRM",
+    moduleKey: "employee-crm",
+    path: "/empcrm/user-dashboard",
+    roles: ["ALL"],
+    icon: "User",
+    children: [],
+  },
+  {
+    name: "HR Operations",
+    moduleKey: "hr-operations",
+    roles: ["ALL"],
+    icon: "Briefcase",
+    children: [
+      {
+        path: "/admin-dashboard/attendance-rules",
+        name: "Attendance rules",
+        moduleKey: "attendance-rules",
+        roles: ["ALL"],
+        icon: "Clock",
+      },
+      {
+        path: "/empcrm/admin-dashboard/hiring",
+        name: "Hiring Process",
+        moduleKey: "hiring-process",
+        roles: ["ALL"],
+        icon: "Users",
+      },
+      {
+        path: "/empcrm/admin-dashboard/profile/approvals-admin",
+        name: "Final Profile Approval",
+        moduleKey: "final-profile-approval",
+        roles: ["ALL"],
+        icon: "UserCircle",
+      },
+      {
+        path: "/empcrm/admin-dashboard/salary",
+        name: "Salary Management",
+        moduleKey: "salary-management",
+        roles: ["ALL"],
+        icon: "DollarSign",
+      },
+      {
+        path: "/empcrm/admin-dashboard/salary-sheet",
+        name: "Salary Sheet",
+        moduleKey: "salary-sheet",
+        roles: ["ALL"],
+        icon: "FileSpreadsheet",
+      },
+      {
+        path: "/empcrm/admin-dashboard/attendance-sheet",
+        name: "Attendance Sheet",
+        moduleKey: "attendance-sheet",
+        roles: ["ALL"],
+        icon: "FileSpreadsheet",
+      },
+      {
+        path: "/empcrm/admin-dashboard/salary-slips",
+        name: "Salary slips",
+        moduleKey: "salary-slips",
+        roles: ["ALL"],
+        icon: "Receipt",
+      },
+      {
+        path: "/user-dashboard/hr-today-report",
+        name: "HR Daily Report",
+        moduleKey: "hr-daily-report",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/admin-dashboard/all-hr-report",
+        name: "All HR Report",
+        moduleKey: "all-hr-report",
+        roles: ["SUPERADMIN"],
+        icon: "FileText",
+      },
+      {
+        path: "/empcrm/user-dashboard/add-paid-leave",
+        name: "Add Paid Leave Request",
+        moduleKey: "add-paid-leaves",
+        roles: ["ALL"],
+        icon: "Calendar",
+      },
+      {
+        path: "/admin-dashboard/paid-leave-ledger",
+        name: "Paid Leave Ledger",
+        moduleKey: "paid-leave-ledger",
+        roles: ["ALL"],
+        icon: "Book",
+      },
+    ],
+  },
+  {
+    name: "Targets",
+    moduleKey: "targets",
+    roles: ["ALL"],
+    icon: "Target",
+    children: [
+      {
+        path: "/admin-dashboard/prospects",
+        name: "Prospects",
+        moduleKey: "prospects-view",
+        roles: ["ALL"],
+        icon: "UserPlus",
+      },
+      {
+        path: "/admin-dashboard/prospects/add-manual",
+        name: "Add Prospect (Manual)",
+        moduleKey: "prospects-add",
+        roles: ["ALL"],
+        icon: "FilePlus2",
+      },
+      {
+        path: "/admin-dashboard/prospects/new",
+        name: "New Prospect",
+        moduleKey: "prospects-new",
+        roles: ["ALL"],
+        icon: "UserPlus",
+      },
+      {
+        path: "/admin-dashboard/hr-designation-targets",
+        name: "HR Targets",
+        moduleKey: "hr-designation-targets",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/monitor-targets",
+        name: "Sales Target",
+        moduleKey: "sales-target",
+        roles: ["ALL"],
+        icon: "Target",
+      },
+    ],
+  },
+  {
+    name: "Import CRM",
+    moduleKey: "import-crm",
+    roles: ["ALL"],
+    icon: "Import",
+    children: [
+      {
+        path: "/admin-dashboard/import-crm/suppliers",
+        name: "Suppliers",
+        moduleKey: "import-suppliers",
+        roles: ["ALL"],
+        icon: "Users",
+      },
+      {
+        path: "/admin-dashboard/import-crm/shipments",
+        name: "Shipments",
+        moduleKey: "import-shipments",
+        roles: ["ALL"],
+        icon: "Ship",
+      },
+      {
+        path: "/admin-dashboard/import-crm/agents",
+        name: "Agents",
+        moduleKey: "import-agents",
+        roles: ["ALL"],
+        icon: "UserPlus",
+      },
+      {
+        path: "/admin-dashboard/import-crm/quote-submissions",
+        name: "Quote Submissions",
+        moduleKey: "import-quote-submissions",
+        roles: ["ALL"],
+        icon: "ScrollText",
+      },
+      {
+        path: "/admin-dashboard/import-crm/award-followups",
+        name: "Award Follow-ups",
+        moduleKey: "import-award-followups",
+        roles: ["ALL"],
+        icon: "PackageCheck",
+      },
+    ],
+  },
+  {
+    name: "Resource Center",
+    moduleKey: "documents",
+    roles: ["ALL"],
+    icon: "BookOpen",
+    children: [
+      {
+        path: "/user-dashboard/blogs",
+        name: "Catalogue",
+        moduleKey: "blog",
+        roles: ["ALL"],
+        icon: "ScrollText",
+      },
+      {
+        path: "/user-dashboard/installation-videos",
+        name: "Installation Videos",
+        moduleKey: "installation-videos",
+        roles: ["ALL"],
+        icon: "PlayCircle",
+      },
+      {
+        path: "/user-dashboard/installation-videos/manage",
+        name: "Manage Video Links",
+        moduleKey: "installation-videos-manage",
+        roles: ["ALL"],
+        icon: "FilePlus2",
+      },
+      {
+        path: "/user-dashboard/assets-management",
+        name: "Assets",
+        moduleKey: "assets",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/qa",
+        name: "Knowledge Base",
+        moduleKey: "qa",
+        roles: ["ALL"],
+        icon: "BookOpen",
+      },
+      {
+        path: "/user-dashboard/company-documents",
+        name: "Company Documents",
+        moduleKey: "company-documents",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/user-dashboard/email-templates",
+        name: "Email Templates",
+        moduleKey: "email-templates",
+        roles: ["ALL"],
+        icon: "Mail",
+      },
+    ],
+  },
+  {
+    path: "/user-dashboard/attendance-log/",
+    name: "All Attendance details",
+    moduleKey: "attendance-log",
+    roles: ["ADMIN", "ACCOUNTANT", "HR", "HR HEAD", "HR EXECUTIVE", "JUNIOR HR EXECUTIVE", "HR RECRUITER", "TEAM LEADER"],
+    icon: "ListOrdered",
+  },
+  {
+    name: "GEM CRM",
+    moduleKey: "gem-crm",
+    roles: ["ALL"],
+    icon: "Gavel",
+    children: [
+      {
+        path: "/gem-dashboard/gem-crm/bids",
+        name: "Bids",
+        moduleKey: "gem-crm-bids",
+        roles: ["ALL"],
+        icon: "FileText",
+      },
+      {
+        path: "/gem-dashboard/gem-crm/reports",
+        name: "Reports",
+        moduleKey: "gem-crm-reports",
+        roles: ["ALL"],
+        icon: "BarChart3",
+      },
+    ],
+  },
+];
+
+function injectEmpCrmChildren(items, empCrmChildren) {
+  if (!empCrmChildren?.length) return items;
+  return items.map((item) => {
+    if (item.name === "Employee CRM") {
+      return { ...item, children: empCrmChildren };
+    }
+    return item;
+  });
+}
+
+function stripDuplicateHrOperationsForHrRole(items, roleKey) {
+  if (!isHrEmployeeCrmRole(roleKey)) return items;
+  return (items || [])
+    .map((item) => {
+      if (item?.name !== "HR Operations" || !item.children?.length) {
+        return item;
+      }
+      const children = item.children.filter(
+        (child) =>
+          !isHrOperationsKeyDuplicatedInAdminEmployeeCrm(child?.moduleKey),
+      );
+      if (!children.length) return null;
+      return { ...item, children };
+    })
+    .filter(Boolean);
+}
+
+function injectHrAdminEmployeeCrmChildren(items, adminChildren) {
+  if (!adminChildren?.length) return items;
+  return items.map((item) => {
+    if (item.name === HR_ADMIN_EMPLOYEE_CRM_MENU_NAME) {
+      return { ...item, children: adminChildren };
+    }
+    return item;
+  });
+}
+
+async function getUserModuleAccess(username, roleKey) {
+  if (!username) return resolveModuleAccess(null, roleKey);
+  try {
+    const conn = await getDbConnection();
+    const [rows] = await conn.execute(
+      "SELECT module_access, userRole FROM rep_list WHERE username = ? LIMIT 1",
+      [username],
+    );
+    if (!rows.length) return [];
+    const role = rows[0].userRole || roleKey;
+    return resolveModuleAccess(rows[0].module_access ?? null, role);
+  } catch (err) {
+    const msg = String(err?.message || "").toLowerCase();
+    if (msg.includes("unknown column") && msg.includes("module_access")) {
+      return resolveModuleAccess(null, roleKey);
+    }
+    return [];
+  }
+}
+
+export default async function getSidebarMenuItems() {
+  const payload = await getSessionPayload();
+  let role = (payload?.role ?? payload?.userRole) || "GUEST";
+  const username = payload?.username || null;
+  if (username) {
+    const dbRole = await getRepListUserRole(username);
+    if (dbRole) role = dbRole;
+  }
+  const roleKey = normalizeRoleKey(role) || "GUEST";
+
+  const empCrmChildren = await getEmpCrmUserMenuChildrenForRole();
+  let menuWithEmpCrm = injectEmpCrmChildren(allMenuItems, empCrmChildren);
+  if (isHrEmployeeCrmRole(roleKey)) {
+    const adminRaw = await getEmpCrmAdminMenuChildrenForRole(roleKey);
+    const adminChildren = adminRaw
+      .filter((item) => item.path !== "/empcrm/admin-dashboard/hiring")
+      .map(toHrEmployeeCrmSidebarItem)
+      .filter(Boolean);
+    menuWithEmpCrm = injectHrAdminEmployeeCrmChildren(
+      menuWithEmpCrm,
+      adminChildren,
+    );
+  }
+  const reportees = username ? await getReportees(username) : [];
+  const hasReportees = reportees.length > 0;
+
+  // Module access is the source of truth (per-user selection in Quick Edit).
+  let items = filterByRole(menuWithEmpCrm, roleKey);
+
+  // Hard deny SUPERADMIN-only modules even when module_access is NULL (backward compat).
+  items = stripSuperadminOnlyMenuItems(items, roleKey);
+
+  // Step 2: filter by module_access (SUPERADMIN and EA bypass — see everything)
+  if (roleKey !== "SUPERADMIN" && roleKey !== "EA") {
+    const allowedModulesRaw = await getUserModuleAccess(username, roleKey);
+    const allowedModules = applyRoleDenyModuleRestrictions(
+      applySuperadminOnlyModuleRestrictions(allowedModulesRaw, roleKey) ?? [],
+      roleKey,
+    ) ?? [];
+    if (roleKey === "ACCOUNTANT" && Array.isArray(allowedModules)) {
+      for (const key of [
+        "salary-management",
+        "salary-sheet",
+        "attendance-sheet",
+        "payment-deductions",
+      ]) {
+        if (!allowedModules.includes(key)) allowedModules.push(key);
+      }
+    }
+
+    const empCrmUserPathAllowed = (path) => {
+      const p = String(path || "");
+      if (!p.startsWith("/empcrm/user-dashboard")) return false;
+      return isModuleKeyAllowed("employee-crm", allowedModules);
+    };
+
+    const isMenuItemModuleAllowed = (item) => {
+      if (hasReportees && isEmpCrmReportingManagerMenuPath(item?.path)) {
+        return true;
+      }
+      const mk = String(item?.moduleKey || "").trim();
+      if (!mk) {
+        return empCrmUserPathAllowed(item?.path)
+          ? true
+          : item?.path
+            ? false
+            : true;
+      }
+      if (mk === "prospect-submissions") {
+        return (
+          isModuleKeyAllowed("prospect-submissions", allowedModules) ||
+          isModuleKeyAllowed("dashboard-home", allowedModules)
+        );
+      }
+      if (isModuleKeyAllowed(mk, allowedModules)) return true;
+      // Only generic EMPCRM home links may inherit employee-crm — not gated HR keys.
+      if (mk === "employee-crm" && empCrmUserPathAllowed(item?.path)) {
+        return true;
+      }
+      return false;
+    };
+
+    const filterByModuleAccess = (list) =>
+      (list || [])
+        .map((item) => {
+          const children = item?.children?.length
+            ? filterByModuleAccess(item.children)
+            : [];
+          const allowed = isMenuItemModuleAllowed(item);
+          if (item?.children?.length) {
+            return children.length > 0 ? { ...item, children } : null;
+          }
+          return allowed ? item : null;
+        })
+        .filter(Boolean);
+
+    items = filterByModuleAccess(items);
+  }
+
+  // Transform paths based on role-specific dashboard
+  items = items.map((item) => transformMenuItemPaths(item, roleKey));
+
+  items = stripDuplicateHrOperationsForHrRole(items, roleKey);
+
+  return items;
+}

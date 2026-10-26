@@ -1,0 +1,231 @@
+const HIRING_STATUS_OPTIONS = [
+  // Current statuses
+  "Talked",
+  "Didn't receive the call",
+  "Cut the call",
+  "Not reachable",
+  "Shortlisted",
+  "Attended Interview",
+  "Selected",
+  "Negotiation",
+  "Hold",
+  "Backup",
+  "Hired",
+  "Joined",
+  "Backout",
+  "After joining backout",
+  "Rejected",
+  // Legacy — kept so old DB rows can still be saved without being reset
+  "Have not talked",
+  "Follow-up",
+  "Shortlisted for interview",
+  "Rescheduled",
+  "next-follow-up",
+  "follow-up",
+  "Waiting List",
+  "Reject",
+];
+
+export const HIRING_TAG_OPTIONS = [
+  "Probation",
+  "Permanent",
+  "Terminate",
+  "Follow-Up",
+  "Denied",
+  "Post-ponding",
+  "Not-looking",
+];
+
+/** No next follow-up datetime required (terminal / closed-loop statuses). */
+export function hiringStatusSkipsNextFollowup(status) {
+  const s = String(status ?? "").trim();
+  return (
+    s === "Rejected" ||
+    s === "Reject" ||
+    s === "Joined" ||
+    s === "Attended Interview" ||
+    s === "Backout" ||
+    s === "After joining backout"
+  );
+}
+
+export const HAVE_NOT_TALKED_REASONS = [
+  "Didn't receive the call",
+  "Cut the call",
+  "Not reachable"
+];
+
+const HIRING_MARITAL_OPTIONS = ["Unmarried", "Married"];
+const HIRING_EXPERIENCE_VALUES = ["fresher", "experience"];
+const HIRING_INTERVIEW_MODES = ["Virtual", "Walk-in"];
+
+/** HR qualitative score (dropdown) — stored as-is in DB */
+export const HR_SCORE_RATING_OPTIONS = ["average", "poor", "good", "very-good"];
+
+function normalizeStatus(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return "Talked";
+  if (HIRING_STATUS_OPTIONS.includes(s)) return s;
+  return "Talked";
+}
+
+function normalizeTag(v, isReason = false) {
+  const t = String(v ?? "").trim();
+  if (!t) return null;
+  if (isReason) {
+    return HAVE_NOT_TALKED_REASONS.includes(t) ? t : null;
+  }
+  return HIRING_TAG_OPTIONS.includes(t) ? t : null;
+}
+
+export function toMysqlDatetime(v) {
+  if (!v) return null;
+  const s = String(v).trim().replace("T", " ");
+  if (s.length === 16) return `${s}:00`;
+  if (s.length >= 19) return s.slice(0, 19);
+  return s;
+}
+
+/**
+ * Shared create/update validation for hiring entries.
+ * @param {object} body
+ * @param {{ skipSelectedResumeValidation?: boolean }} [options] — Superadmin `candidates` PATCH has no resume/mgmt fields; set true to allow status Selected without those assets.
+ * @returns {{ error: string } | { data: object }}
+ */
+export function parseHiringPayload(body, options = {}) {
+  const skipSelectedResumeValidation = options.skipSelectedResumeValidation === true;
+  const candidate_name = String(body.candidate_name ?? "").trim();
+  const designation = String(body.designation ?? "").trim();
+  const emp_contact = String(body.emp_contact ?? "").trim();
+  const marital_raw = String(body.marital_status ?? "").trim();
+  const experience_raw = String(body.experience_type ?? "").trim();
+  const interview_at_raw = String(body.interview_at ?? "").trim();
+  const interview_mode_raw = String(body.interview_mode ?? "").trim();
+  const note = String(body.note ?? "").trim();
+  const status = normalizeStatus(body.status);
+  const isHired = status === "Hired";
+  const isJoined = status === "Joined";
+  const isAttendedInterview = status === "Attended Interview";
+  const isSelected = status === "Selected";
+  const isRescheduled = status === "Rescheduled";
+  const isHaveNotTalked = ["Didn't receive the call", "Cut the call", "Not reachable"].includes(status) || status === "Have not talked";
+  /** Legacy slug — next slot is required. */
+  const isNextFollowUpStrict = status === "next-follow-up";
+  /** Current label — optional next slot if provided. */
+  const isFollowUpLabel = status === "Talked";
+  const rescheduled_at_raw = String(body.rescheduled_at ?? "").trim();
+  const next_followup_at_raw = String(body.next_followup_at ?? "").trim();
+  const tagForHired = isHired ? normalizeTag(body.tag) : null;
+  const isHiredFollowUpTag = isHired && tagForHired === "Follow-Up";
+  const tagForHaveNotTalked = isHaveNotTalked ? normalizeTag(body.tag, true) : null;
+  const hire_date = (isHired || isJoined) ? String(body.hire_date ?? "").trim() || null : null;
+  const tag = isHired ? tagForHired : null;
+  const packageStr = isHired ? String(body.package ?? "").trim() || null : null;
+
+  let probation_months = null;
+  if (isHired && tag === "Probation") {
+    const pm = parseInt(String(body.probation_months ?? "").trim(), 10);
+    if (!Number.isFinite(pm) || pm < 1 || pm > 120) {
+      return { error: "When tag is Probation, enter probation duration (1–120 months)." };
+    }
+    probation_months = pm;
+  }
+
+  const selected_resume = String(body.selected_resume ?? "").trim() || null;
+
+  let mgmt_interview_score = null;
+  const mgmtRaw = String(body.mgmt_interview_score ?? "").trim();
+  if (mgmtRaw !== "") {
+    const n = parseInt(mgmtRaw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 10) mgmt_interview_score = n;
+  }
+
+  // Always parsed — field is always visible (not Selected-only)
+  let hr_interview_score = null;
+  const hrRaw = String(body.hr_interview_score ?? "").trim();
+  if (hrRaw !== "") {
+    const n = parseInt(hrRaw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 10) hr_interview_score = n;
+  }
+
+  const current_salary = String(body.current_salary ?? "").trim() || null;
+  const expected_salary = String(body.expected_salary ?? "").trim() || null;
+  const current_location = String(body.current_location ?? "").trim() || null;
+  const hiring_city = String(body.hiring_city ?? "").trim().slice(0, 120) || null;
+
+  const hr_score_rating_raw = String(body.hr_score_rating ?? "").trim();
+  const hr_score_rating = HR_SCORE_RATING_OPTIONS.includes(hr_score_rating_raw) ? hr_score_rating_raw : null;
+
+  if (!candidate_name || !designation || !emp_contact) {
+    return { error: "Employee name, contact, and designation are required." };
+  }
+  if (marital_raw && !HIRING_MARITAL_OPTIONS.includes(marital_raw)) {
+    return { error: "Invalid marital status." };
+  }
+  if (experience_raw && !HIRING_EXPERIENCE_VALUES.includes(experience_raw)) {
+    return { error: "Invalid experience / fresher value." };
+  }
+  if (interview_mode_raw && !HIRING_INTERVIEW_MODES.includes(interview_mode_raw)) {
+    return { error: "Invalid mode of interview." };
+  }
+  if (!note) {
+    return { error: "Note is required." };
+  }
+
+  if ((isHired || isJoined) && !hire_date) {
+    return { error: "Joining date is required for this status." };
+  }
+  if (isHired && !tag) {
+    return { error: "Tag is required for this status." };
+  }
+  if (isHaveNotTalked && status === "Have not talked" && !tagForHaveNotTalked) {
+    return { error: "Reason is required when status is Have not talked." };
+  }
+  if (isHired && !packageStr) {
+    return { error: "Package is required for this status." };
+  }
+  if (isRescheduled && !rescheduled_at_raw) {
+    return { error: "Rescheduled date and time is required when status is Rescheduled." };
+  }
+  if (!hiringStatusSkipsNextFollowup(status) && !next_followup_at_raw) {
+    return { error: "Next follow-up date and time is required for this status." };
+  }
+  if (isSelected && !skipSelectedResumeValidation && !selected_resume) {
+    return { error: "Resume is required when status is Selected." };
+  }
+  if (isSelected && !skipSelectedResumeValidation && mgmt_interview_score === null) {
+    return { error: "Management interview score (1–10) is required when status is Selected." };
+  }
+
+  const resolved_next_followup_at = hiringStatusSkipsNextFollowup(status)
+    ? null
+    : next_followup_at_raw;
+
+  return {
+    data: {
+      candidate_name,
+      emp_contact,
+      designation,
+      marital_status: marital_raw || null,
+      experience_type: experience_raw || null,
+      interview_at: interview_at_raw || null,
+      rescheduled_at: isRescheduled ? rescheduled_at_raw : null,
+      next_followup_at: resolved_next_followup_at,
+      interview_mode: interview_mode_raw || null,
+      status,
+      tag: isHaveNotTalked && status === "Have not talked" ? tagForHaveNotTalked : tag,
+      hire_date,
+      packageStr,
+      probation_months,
+      selected_resume,
+      mgmt_interview_score,
+      hr_interview_score,
+      hr_score_rating,
+      current_salary,
+      expected_salary,
+      current_location,
+      hiring_city,
+      note,
+    },
+  };
+}

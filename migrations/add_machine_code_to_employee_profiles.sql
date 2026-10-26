@@ -1,0 +1,1 @@
+-- Superseded: use migrations/add_machine_code_to_rep_list.sql (machine_code on rep_list after empId)

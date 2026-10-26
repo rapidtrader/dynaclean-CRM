@@ -1,0 +1,221 @@
+import { NextResponse } from "next/server";
+import { getDbConnection } from "@/lib/db";
+import { getSessionPayload } from "@/lib/auth";
+import { normalizeRoleKey } from "@/lib/roleKeyUtils";
+
+const HR_SALARY_ROLES = ["SUPERADMIN", "DIRECTOR", "HR HEAD", "HR", "HR Executive", "JUNIOR HR EXECUTIVE", "HR RECRUITER", "ACCOUNTANT"];
+const DELETE_ALLOWED_ROLES = ["SUPERADMIN", "DIRECTOR", "ADMIN"];
+const APPROVE_ALLOWED_ROLES = ["SUPERADMIN", "DIRECTOR", "ADMIN"];
+
+function hasSalaryRole(payload) {
+  const role = normalizeRoleKey(payload?.role ?? payload?.userRole ?? "");
+  return HR_SALARY_ROLES.some((r) => normalizeRoleKey(r) === role);
+}
+
+function hasDeleteRole(payload) {
+  const role = normalizeRoleKey(payload?.role ?? payload?.userRole ?? "");
+  return DELETE_ALLOWED_ROLES.some((r) => normalizeRoleKey(r) === role);
+}
+
+function hasApproveRole(payload) {
+  const role = normalizeRoleKey(payload?.role ?? payload?.userRole ?? "");
+  return APPROVE_ALLOWED_ROLES.some((r) => normalizeRoleKey(r) === role);
+}
+
+const DEFAULT_LIMIT = 200;
+const MAX_LIMIT = 500;
+
+/**
+ * GET — all employees' monthly salary rows (payslip list). HR roles and ACCOUNTANT.
+ * Query: month=YYYY-MM, search=username/empId fragment, limit, offset
+ */
+export async function GET(request) {
+  try {
+    const payload = await getSessionPayload();
+    if (!payload || !hasSalaryRole(payload)) {
+      return NextResponse.json({ message: "Unauthorized access." }, { status: 403 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const month = searchParams.get("month");
+    const search = (searchParams.get("search") || "").trim();
+    let limit = parseInt(searchParams.get("limit") || String(DEFAULT_LIMIT), 10);
+    let offset = parseInt(searchParams.get("offset") || "0", 10);
+    if (!Number.isFinite(limit) || limit < 1) limit = DEFAULT_LIMIT;
+    if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+    if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+    const db = await getDbConnection();
+
+    let query = `
+      SELECT 
+        esr.*,
+        rl.username as full_name,
+        rl.email,
+        rl.userDepartment,
+        rl.userRole,
+        rl.empId,
+        ep.bank_name,
+        ep.bank_account_number,
+        ep.pf_uan,
+        ep.esic_number,
+        ep.pan_number,
+        ep.department,
+        ep.date_of_joining,
+        rl.gender
+      FROM monthly_salary_records esr
+      JOIN rep_list rl ON esr.username = rl.username
+      LEFT JOIN employee_profiles ep ON rl.username = ep.username
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (month) {
+      query += " AND esr.salary_month = ?";
+      params.push(month);
+    }
+    if (search) {
+      const like = `%${search}%`;
+      query += " AND (esr.username LIKE ? OR rl.empId LIKE ? OR rl.email LIKE ?)";
+      params.push(like, like, like);
+    }
+
+    query += " ORDER BY esr.salary_month DESC, esr.username ASC LIMIT ? OFFSET ?";
+    params.push(limit, offset);
+
+    const [salaryRecords] = await db.query(query, params);
+
+    if (salaryRecords.length > 0) {
+      try {
+        const recordIds = salaryRecords.map((r) => r.id);
+        const placeholders = recordIds.map(() => "?").join(",");
+        const [deductionDetails] = await db.query(
+          `SELECT * FROM salary_deduction_details WHERE salary_record_id IN (${placeholders})`,
+          recordIds
+        );
+        salaryRecords.forEach((record) => {
+          record.deduction_details = deductionDetails.filter(
+            (d) => d.salary_record_id === record.id
+          );
+        });
+      } catch {
+        // salary_deduction_details table may not exist yet — non-fatal
+        salaryRecords.forEach((record) => { record.deduction_details = []; });
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      salaryRecords,
+      limit,
+      offset,
+    });
+  } catch (error) {
+    console.error("Error fetching all salary records:", error);
+    return NextResponse.json(
+      { message: "Internal server error." },
+      { status: 500 }
+    );
+  }
+}
+
+const VALID_STATUS_TRANSITIONS = ["approved", "paid", "pending", "draft"];
+
+/**
+ * PATCH — bulk update status of salary records.
+ * Body: { ids: number[], status: string }
+ * HR roles allowed.
+ */
+export async function PATCH(request) {
+  try {
+    const payload = await getSessionPayload();
+    if (!payload || !hasApproveRole(payload)) {
+      return NextResponse.json({ message: "Unauthorized. Only HR / SUPERADMIN can update records." }, { status: 403 });
+    }
+
+    const body = await request.json();
+    const { ids, status } = body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return NextResponse.json({ message: "No record IDs provided." }, { status: 400 });
+    }
+
+    if (!VALID_STATUS_TRANSITIONS.includes(status)) {
+      return NextResponse.json({ message: `Invalid status. Allowed: ${VALID_STATUS_TRANSITIONS.join(", ")}` }, { status: 400 });
+    }
+
+    const validIds = ids.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    if (validIds.length === 0) {
+      return NextResponse.json({ message: "Invalid IDs." }, { status: 400 });
+    }
+
+    const placeholders = validIds.map(() => "?").join(",");
+    const db = await getDbConnection();
+
+    const [result] = await db.query(
+      `UPDATE monthly_salary_records SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
+      [status, ...validIds]
+    );
+
+    return NextResponse.json({
+      success: true,
+      updated: result.affectedRows,
+      status,
+    });
+  } catch (error) {
+    console.error("Error updating salary records status:", error);
+    return NextResponse.json({ message: "Internal server error." }, { status: 500 });
+  }
+}
+
+/**
+ * DELETE — bulk delete salary records by IDs.
+ * Body: { ids: number[] }
+ * Only SUPERADMIN / HR HEAD / HR allowed.
+ */
+export async function DELETE(request) {
+  try {
+    const payload = await getSessionPayload();
+    if (!payload || !hasDeleteRole(payload)) {
+      return NextResponse.json({ message: "Unauthorized. Only HR / SUPERADMIN can delete records." }, { status: 403 });
+    }
+
+    const body = await request.json();
+    const ids = body?.ids;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return NextResponse.json({ message: "No record IDs provided." }, { status: 400 });
+    }
+
+    const validIds = ids.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+    if (validIds.length === 0) {
+      return NextResponse.json({ message: "Invalid IDs." }, { status: 400 });
+    }
+
+    const placeholders = validIds.map(() => "?").join(",");
+    const db = await getDbConnection();
+
+    // Delete deduction details first (child rows)
+    try {
+      await db.query(
+        `DELETE FROM salary_deduction_details WHERE salary_record_id IN (${placeholders})`,
+        validIds
+      );
+    } catch {
+      // Table may not exist yet — ignore
+    }
+
+    const [result] = await db.query(
+      `DELETE FROM monthly_salary_records WHERE id IN (${placeholders})`,
+      validIds
+    );
+
+    return NextResponse.json({
+      success: true,
+      deleted: result.affectedRows,
+    });
+  } catch (error) {
+    console.error("Error deleting salary records:", error);
+    return NextResponse.json({ message: "Internal server error." }, { status: 500 });
+  }
+}

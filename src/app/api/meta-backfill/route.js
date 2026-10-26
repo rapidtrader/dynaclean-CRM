@@ -1,0 +1,553 @@
+import { getDbConnection } from "@/lib/db";
+import { normalizePhone, PHONE_LAST10_WHERE } from "@/lib/phone-check";
+import { resolveTamilAssigneeUsername } from "@/lib/tamilAssigneeResolve";
+import {
+  extractProductFromMetaFieldData,
+  buildProductsInterestLabel,
+} from "@/lib/metaLeadProduct";
+import { getFBCredentials } from "@/lib/fbCredentials";
+
+// Allow up to 5 min for Meta API (mode=all can be slow)
+export const maxDuration = 300;
+
+// get state from pincode
+// async function getStateFromPincode(pincode) {
+//   if (!pincode) return null;
+
+//   try {
+//     const res = await fetch(`https://api.postalpincode.in/pincode/${pincode}`);
+//     const data = await res.json();
+//     console.log("📍 Pincode data:", data);
+
+//     if (
+//       Array.isArray(data) &&
+//       data[0]?.Status === "Success" &&
+//       data[0]?.PostOffice?.length
+//     ) {
+//       console.log("📍 State from pincode:", data[0].PostOffice[0].State);
+//       return data[0].PostOffice[0].State;
+//     }
+//   } catch (err) {
+//     console.warn("⚠️ Pincode lookup failed:", pincode, err);
+//   }
+
+//   return null;
+// }
+
+// Helper: parse lead field_data from Meta into our shape
+// function parseLeadFromFieldData(fieldData, extra = {}) {
+//   const getValue = (name) =>
+//     fieldData.find((f) => f.name === name)?.values?.[0] || null;
+
+//   const first_name = getValue("full_name") || getValue("first_name");
+//   const email = getValue("email");
+//   const rawPhone = getValue("phone_number");
+//   const address = getValue("city");
+
+//   return {
+//     first_name: first_name || "",
+//     email: email || "",
+//     phone: normalizePhone(rawPhone),
+//     address: address || "",
+//     ...extra,
+//   };
+// }
+
+export function parseLeadFromFieldData(fieldData, extra = {}) {
+  const getValue = (name) =>
+    fieldData.find((f) => f.name === name)?.values?.[0] || null;
+
+  const first_name = getValue("full_name") || getValue("first_name");
+  const email = getValue("email");
+  const rawPhone = getValue("phone_number");
+  const address = getValue("city");
+  const language = getValue("preferred_language_to_communicate");
+  // const pincode = getValue("postcode") || getValue("zipcode");
+
+  return {
+    first_name: first_name || "",
+    email: email || "",
+    phone: normalizePhone(rawPhone),
+    address: address || "",
+    language:language || "",
+    ...extra,
+  };
+}
+
+// GET /api/meta-backfill?since=YYYY-MM-DD&until=YYYY-MM-DD
+// 1) Fetch leads from Meta for the date range
+// 2) Filter out leads whose phone already exists in `customers`
+// 3) Return only NEW leads (not in DB) so UI can display & choose which to import
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const since = searchParams.get("since"); // e.g. 2025-01-01
+  const until = searchParams.get("until"); // e.g. 2025-01-03
+  const mode = searchParams.get("mode") || "range"; // "range" or "all"
+  const autoImportParam = searchParams.get("autoImport");
+  const autoImport =
+    autoImportParam === "1" ||
+    autoImportParam === "true" ||
+    autoImportParam === "yes";
+  const formIdsParam = searchParams.get("formIds");
+  const formIds = formIdsParam ? formIdsParam.split(',') : null;
+
+  // For normal mode we require a date range; for mode=all we don't
+  if (mode !== "all" && (!since || !until)) {
+    return new Response("Missing since/until query params", { status: 400 });
+  }
+
+  const credentials = await getFBCredentials();
+  const token = credentials?.FB_PAGE_TOKEN;
+  const formId = formIds ? formIds[0] : credentials?.FB_LEAD_FORM_ID;
+
+  if (!token || !formId) {
+    return new Response("FB_PAGE_TOKEN or FB_LEAD_FORM_ID not configured in database", {
+      status: 500,
+    });
+  }
+
+  try {
+    // Build Meta leads API URL(s) - support multiple form IDs
+    const targetFormIds = formIds || [formId];
+    let rawLeads = [];
+
+    for (const currentFormId of targetFormIds) {
+      let url = new URL(`https://graph.facebook.com/v18.0/${currentFormId}/leads`);
+      url.searchParams.set("access_token", token);
+      url.searchParams.set("limit", "100"); // page size
+      url.searchParams.set("fields", "field_data,ad_id,created_time");
+
+      // Only send time_range if we're not fetching ALL history
+      if (mode !== "all") {
+        url.searchParams.set("time_range[since]", since);
+        url.searchParams.set("time_range[until]", until);
+      }
+
+      // Fetch pages from Meta (max 20 pages = 2000 leads for mode=all to avoid timeout)
+      let pageCount = 0;
+      const maxPages = mode === "all" ? 20 : 50;
+      while (url && pageCount < maxPages) {
+        pageCount += 1;
+        const res = await fetch(url.toString());
+        const data = await res.json();
+        console.log(`data from meta page ${currentFormId} page`, pageCount, data?.data?.length);
+
+        if (!res.ok) {
+          console.error("❌ Meta backfill error:", data);
+          return Response.json(
+            {
+              error: "meta_fetch_failed",
+              message: `Failed to fetch leads from Meta for form ${currentFormId}`,
+              metaError: data?.error || data,
+            },
+            { status: 502 }
+          );
+        }
+
+        rawLeads = rawLeads.concat(data?.data || []);
+
+        const next = data?.paging?.next;
+        url = next ? new URL(next) : null;
+      }
+    }
+
+    // Map raw leads into our shape
+    const allLeads = rawLeads.map((lead) => {
+      const fieldData = lead.field_data || [];
+      const created_time = lead.created_time || null;
+      const ad_id = lead.ad_id || null;
+      const leadgen_id = lead.id; // Meta lead id
+
+      return {
+        leadgen_id,
+        created_time,
+        ad_id,
+        field_data: fieldData,
+        ...parseLeadFromFieldData(fieldData, {
+          lead_campaign: "social_media",
+          products_interest: "", // resolved below (campaign + form product)
+        }),
+      };
+    });
+
+    // Extra safety: filter by created_time in our own code as well,
+    // because Meta may ignore time_range and return older leads.
+    let leadsInRange = allLeads;
+
+    if (mode !== "all") {
+      const sinceDate = new Date(`${since}T00:00:00Z`);
+      const untilDate = new Date(`${until}T23:59:59Z`);
+
+      leadsInRange = allLeads.filter((l) => {
+        if (!l.created_time) return false;
+        const created = new Date(l.created_time);
+        return created >= sinceDate && created <= untilDate;
+      });
+    }
+
+    // first latest lead data
+    console.log("Latest lead first:", allLeads[0]);
+
+    // Collect phones and check which already exist in DB
+    const phones = leadsInRange.map((l) => l.phone).filter((p) => !!p);
+
+    let existingPhones = new Set();
+    const conn = await getDbConnection();
+
+    // Get total leads count in database
+    const [countRows] = await conn.execute(
+      `SELECT COUNT(*) AS total FROM customers`,
+    );
+    const total_leads_in_db = countRows[0]?.total ?? 0;
+
+    if (phones.length) {
+      const placeholders = phones.map(() => "?").join(",");
+      const [rows] = await conn.execute(
+        `SELECT phone FROM customers WHERE phone IN (${placeholders})`,
+        phones,
+      );
+      existingPhones = new Set(rows.map((r) => normalizePhone(r.phone)));
+    }
+
+    // Now only keep leads that are BOTH in the date range AND not in customers
+    const newLeads = leadsInRange.filter(
+      (l) => l.phone && !existingPhones.has(l.phone),
+    );
+
+    // Resolve products_interest: Meta campaign name + optional form "product" question
+    for (const lead of newLeads) {
+      const formProduct = extractProductFromMetaFieldData(
+        lead.field_data || [],
+      );
+      let campaignName = "";
+      if (lead.ad_id) {
+        try {
+          const adRes = await fetch(
+            `https://graph.facebook.com/v18.0/${lead.ad_id}?fields=campaign_id&access_token=${token}`,
+          );
+          const adJson = await adRes.json();
+          const campaign_id = adJson?.campaign_id;
+
+          if (campaign_id) {
+            const campRes = await fetch(
+              `https://graph.facebook.com/v18.0/${campaign_id}?fields=name&access_token=${token}`,
+            );
+            const campJson = await campRes.json();
+            campaignName = campJson?.name || "";
+          }
+        } catch (err) {
+          console.warn("⚠️ Failed to resolve campaign for ad", lead.ad_id, err);
+        }
+      }
+      lead.products_interest =
+        buildProductsInterestLabel({
+          formProduct,
+          campaignName,
+        }) || formProduct || "";
+    }
+
+    // If requested, automatically import all new leads into DB
+    let importSummary = null;
+    if (autoImport && newLeads.length) {
+      const results = [];
+
+      for (const lead of newLeads) {
+        try {
+          const insertResult = await insertLeadIntoDb(lead);
+          results.push({ leadgen_id: lead.leadgen_id, ...insertResult });
+        } catch (err) {
+          console.error(
+            "❌ Auto-import error for lead",
+            lead.leadgen_id,
+            err,
+          );
+          results.push({ leadgen_id: lead.leadgen_id, error: "exception" });
+        }
+      }
+
+      importSummary = {
+        totalNewLeads: newLeads.length,
+        imported: results.filter(
+          (r) => !r.skipped && !r.error,
+        ).length,
+        skipped: results.filter((r) => r.skipped).length,
+        errors: results.filter((r) => r.error).length,
+        results,
+      };
+    }
+
+    return Response.json({
+      total_from_meta: allLeads.length,
+      total_in_range: leadsInRange.length,
+      existing_in_db: existingPhones.size,
+      new_count: newLeads.length,
+      total_leads_in_db,
+      autoImported: autoImport,
+      importSummary,
+      leads: newLeads,
+    });
+  } catch (err) {
+    console.error("❌ Error in meta-backfill GET:", err);
+    return new Response("Server error", { status: 500 });
+  }
+}
+
+// Helper: insert ONE lead into DB (reusing your webhook logic)
+/** @param {{ forceAssignTo?: string }} [options] If set (e.g. KAVYA), assign only to that rep (Tamil form backfill). */
+export async function insertLeadIntoDb(lead, options = {}) {
+  const conn = await getDbConnection();
+  const forceAssignTo = options.forceAssignTo;
+
+  let assignedTo;
+  /** If true, skip UPDATE lead_distribution (assignee only in rep_list or literal fallback). */
+  let skipLeadDistributionUpdate = false;
+
+  if (forceAssignTo) {
+    const resolved = await resolveTamilAssigneeUsername(conn, forceAssignTo);
+    assignedTo = resolved.username;
+    skipLeadDistributionUpdate = !resolved.incrementLeadDistribution;
+
+    if (resolved.incrementLeadDistribution) {
+      const [ldRows] = await conn.execute(
+        `SELECT * FROM lead_distribution WHERE is_active = 1 AND UPPER(TRIM(username)) = UPPER(?) LIMIT 1`,
+        [assignedTo],
+      );
+      const rep = ldRows[0];
+      if (rep && rep.assigned_count >= rep.max_leads) {
+        await conn.execute(
+          `UPDATE lead_distribution SET assigned_count = 0 WHERE is_active = 1 AND UPPER(TRIM(username)) = UPPER(?)`,
+          [assignedTo],
+        );
+      }
+    }
+  } else {
+    let repRows = [];
+
+    const normalizedLanguage = lead.language?.toUpperCase();
+
+    if (normalizedLanguage === "TAMIL") {
+      const [rows] = await conn.execute(
+        `SELECT *
+         FROM lead_distribution
+         WHERE is_active = 1
+           AND username = 'KAVYA'
+           AND assigned_count < max_leads
+         LIMIT 1`,
+      );
+
+      if (rows.length) {
+        repRows = rows;
+      }
+    }
+
+    if (!repRows.length) {
+      const [rows] = await conn.execute(
+        `SELECT *
+         FROM lead_distribution
+         WHERE is_active = 1
+         ORDER BY priority ASC, last_assigned_at ASC`,
+      );
+      repRows = rows;
+    }
+
+    if (repRows.length === 0) {
+      throw new Error("No reps available");
+    }
+
+    let selectedRep = null;
+
+    for (const rep of repRows) {
+      if (rep.assigned_count < rep.max_leads) {
+        selectedRep = rep;
+        break;
+      }
+    }
+
+    if (!selectedRep) {
+      await conn.execute(
+        `UPDATE lead_distribution
+         SET assigned_count = 0
+         WHERE is_active = 1`,
+      );
+      selectedRep = repRows[0];
+    }
+
+    assignedTo = selectedRep.username;
+  }
+
+  const now = new Date();
+
+  // Final safety: skip if phone already exists (last 10 digits only)
+  const normalizedLeadPhone = normalizePhone(lead.phone);
+  if (normalizedLeadPhone && normalizedLeadPhone.length === 10) {
+    const [rows] = await conn.execute(
+      `SELECT customer_id FROM customers WHERE ${PHONE_LAST10_WHERE} LIMIT 1`,
+      [normalizedLeadPhone],
+    );
+    if (rows.length) {
+      console.log("ℹ️ Skipping lead, phone already exists:", lead.phone);
+      return { skipped: true, reason: "phone_exists" };
+    }
+  }
+
+  const {
+    first_name,
+    email,
+    phone,
+    address,
+    lead_campaign = "social_media",
+    products_interest = "",
+  } = lead;
+
+  // Store normalized phone (last 10 digits) when valid
+  const phoneToStore = (normalizedLeadPhone && normalizedLeadPhone.length === 10) ? normalizedLeadPhone : phone;
+
+  const [customerResult] = await conn.execute(
+    `INSERT INTO customers (
+        first_name, email, phone, address, lead_campaign,
+        lead_source, sales_representative, assigned_to, status, date_created, products_interest
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      first_name,
+      email,
+      phoneToStore,
+      address || "",
+      lead_campaign,
+      assignedTo,
+      assignedTo,
+      "Automatic",
+      "New",
+      now,
+      products_interest,
+    ],
+  );
+
+  const customerId = await customerResult.insertId;
+
+  await conn.execute(
+    `INSERT INTO customers_followup (
+        customer_id, name, contact, next_followup_date, followed_by,
+        followed_date, communication_mode, notes, email
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      customerId,
+      first_name,
+      phoneToStore,
+      null,
+      assignedTo,
+      now,
+      "Facebook",
+      "Lead from Facebook ad (backfill)",
+      email || "",
+    ],
+  );
+
+  if (!skipLeadDistributionUpdate) {
+    await conn.execute(
+      `UPDATE lead_distribution
+         SET assigned_count = assigned_count + 1,
+             last_assigned_at = ?
+       WHERE UPPER(TRIM(username)) = UPPER(?)`,
+      [now, assignedTo],
+    );
+  }
+
+  return { skipped: false, customerId };
+}
+
+// POST /api/meta-backfill
+// Body: { leadIds: ["LEAD_ID_1", "LEAD_ID_2", ...] }
+// For each lead id:
+//  - fetch full lead data from Meta
+//  - normalize/parse
+//  - insert into DB using same logic as webhook
+export async function POST(request) {
+  const body = await request.json();
+  const leadIds = body?.leadIds;
+
+  if (!Array.isArray(leadIds) || leadIds.length === 0) {
+    return new Response("leadIds array is required", { status: 400 });
+  }
+
+  const credentials = await getFBCredentials();
+  const token = credentials?.FB_PAGE_TOKEN;
+  if (!token) {
+    return new Response("FB_PAGE_TOKEN not configured in database", { status: 500 });
+  }
+
+  const results = [];
+
+  try {
+    for (const leadgen_id of leadIds) {
+      try {
+        const leadRes = await fetch(
+          `https://graph.facebook.com/v18.0/${leadgen_id}?fields=field_data,ad_id,created_time&access_token=${token}`,
+        );
+        const leadData = await leadRes.json();
+        console.log(
+          "🟦 RAW META field_data:",
+          JSON.stringify(leadData.field_data, null, 2),
+        );
+
+        if (!leadRes.ok) {
+          console.error("❌ Failed to fetch lead", leadgen_id, leadData);
+          results.push({ leadgen_id, error: "fetch_failed" });
+          continue;
+        }
+
+        const fieldData = leadData?.field_data || [];
+        const ad_id = leadData?.ad_id;
+
+        // Optional: resolve campaign name (like webhook) if ad_id exists
+        let campaignName = "";
+        if (ad_id) {
+          try {
+            const adRes = await fetch(
+              `https://graph.facebook.com/v18.0/${ad_id}?fields=campaign_id&access_token=${token}`,
+            );
+            const adJson = await adRes.json();
+            const campaign_id = adJson?.campaign_id;
+
+            if (campaign_id) {
+              const campRes = await fetch(
+                `https://graph.facebook.com/v18.0/${campaign_id}?fields=name&access_token=${token}`,
+              );
+              const campJson = await campRes.json();
+              campaignName = campJson?.name || "";
+            }
+          } catch (err) {
+            console.warn("⚠️ Failed to resolve campaign for", ad_id, err);
+          }
+        }
+
+        const formProduct = extractProductFromMetaFieldData(fieldData);
+        const products_interest =
+          buildProductsInterestLabel({
+            formProduct,
+            campaignName,
+          }) || formProduct || "";
+
+        const parsed = parseLeadFromFieldData(fieldData, {
+          lead_campaign: "social_media",
+          products_interest,
+        });
+
+        if (!parsed.phone && !parsed.email) {
+          results.push({ leadgen_id, skipped: true, reason: "no_contact" });
+          continue;
+        }
+
+        const insertResult = await insertLeadIntoDb(parsed);
+        results.push({ leadgen_id, ...insertResult });
+      } catch (err) {
+        console.error("❌ Error handling lead", leadgen_id, err);
+        results.push({ leadgen_id, error: "exception" });
+      }
+    }
+
+    return Response.json({ count: results.length, results });
+  } catch (err) {
+    console.error("❌ Error in meta-backfill POST:", err);
+    return new Response("Server error", { status: 500 });
+  }
+}

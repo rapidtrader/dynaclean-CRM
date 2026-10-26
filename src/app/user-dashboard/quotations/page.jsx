@@ -1,0 +1,213 @@
+import Link from "next/link";
+import { getDbConnection } from "@/lib/db";
+import { getSessionPayload } from "@/lib/auth";
+import UserQuotationsListClient from "./UserQuotationsListClient";
+import { userHasModuleKey } from "@/lib/userModuleAccessServer";
+import { sqlColumnInActiveServiceSupportUsers } from "@/lib/serviceSupportTeamScope";
+
+export const dynamic = "force-dynamic";
+
+// FETCH QUOTATIONS
+async function getQuotations(username, role, { search, date_from, date_to, customer_id }) {
+  const conn = await getDbConnection();
+
+  let query = `
+    SELECT
+      qr.quote_number,
+      qr.quote_date,
+      qr.company_name,
+      qr.grand_total,
+      qr.emp_name AS created_by,
+      c.first_name AS client_name,
+      c.email,
+      c.phone,
+      IF(no.order_id IS NOT NULL, 1, 0) AS has_order
+    FROM quotations_records qr
+    LEFT JOIN customers c ON c.customer_id = qr.customer_id
+    LEFT JOIN neworder no ON no.quote_number = qr.quote_number
+  `;
+  
+  let conditions = [];
+  let values = [];
+
+  // ---------------------------------------------------------
+  // ⭐ SERVICE SUPPORT → all active teammates' quotations (optional customer_id filter)
+  // ---------------------------------------------------------
+  if (role === "SERVICE SUPPORT") {
+    conditions.push(sqlColumnInActiveServiceSupportUsers("qr.emp_name"));
+    if (customer_id) {
+      conditions.push(`qr.customer_id = ?`);
+      values.push(customer_id);
+    }
+  }
+  // ---------------------------------------------------------
+  // ⭐ IF customer_id IS PROVIDED → SHOW ALL QUOTATIONS FOR THAT CUSTOMER
+  // (Regardless of user role)
+  // ---------------------------------------------------------
+  else if (customer_id) {
+    conditions.push(`qr.customer_id = ?`);
+    values.push(customer_id);
+  }
+  // ---------------------------------------------------------
+  // ⭐ SERVICE HEAD → SEE ALL SERVICE TEAM QUOTATIONS (skip this role check if customer_id present)
+  // ⭐ DIRECTOR → SEE ALL QUOTATIONS (skip this role check if customer_id present)
+  // ---------------------------------------------------------
+  else if (String(role).toUpperCase() === "DIRECTOR") {
+    // No conditions - see all
+  } else if (role === "SERVICE HEAD") {
+    conditions.push(`qr.emp_name NOT IN (
+      SELECT username FROM rep_list
+      WHERE userRole LIKE '%SALES%'
+    )`);
+  }
+  // ---------------------------------------------------------
+  // ⭐ NORMAL USERS (Sales, Service engineer, etc.)
+  // ---------------------------------------------------------
+  else {
+    conditions.push(`qr.emp_name = ?`);
+    values.push(username);
+  }
+
+  // ---------------------------------------------------------
+  // ⭐ SEARCH FILTER
+  // ---------------------------------------------------------
+  if (search) {
+    conditions.push(`(
+      qr.quote_number LIKE ?
+      OR qr.company_name LIKE ?
+      OR c.first_name LIKE ?
+      OR c.email LIKE ?
+      OR c.phone LIKE ?
+      OR qr.emp_name LIKE ?
+    )`);
+    const like = `%${search}%`;
+    values.push(like, like, like, like, like, like);
+  }
+
+  // ---------------------------------------------------------
+  // ⭐ DATE FILTER (full range, or open-ended if only one date)
+  // ---------------------------------------------------------
+  if (date_from && date_to) {
+    conditions.push(`qr.quote_date BETWEEN ? AND ?`);
+    values.push(date_from, date_to);
+  } else if (date_from) {
+    conditions.push(`qr.quote_date >= ?`);
+    values.push(date_from);
+  } else if (date_to) {
+    conditions.push(`qr.quote_date <= ?`);
+    values.push(date_to);
+  }
+
+  // Build WHERE clause
+  if (conditions.length > 0) {
+    query += ` WHERE ` + conditions.join(` AND `);
+  }
+
+  // ---------------------------------------------------------
+  // ⭐ ORDER BY LATEST FIRST
+  // ---------------------------------------------------------
+  query += ` ORDER BY qr.quote_date DESC `;
+
+  const [rows] = await conn.execute(query, values);
+  return rows;
+}
+
+export default async function QuotationPage({ searchParams }) {
+  const payload = await getSessionPayload();
+  if (!payload) return null;
+
+  const username = payload.username;
+  const role = payload.role;
+
+  const params = await searchParams;
+
+  const filters = {
+    search: params?.search ?? "",
+    date_from: params?.date_from ?? "",
+    date_to: params?.date_to ?? "",
+    customer_id: params?.customer_id ? String(params.customer_id).trim() : "",
+  };
+
+  const quotations = await getQuotations(username, role, filters);
+  const canPerformaInvoice = await userHasModuleKey(username, role, "performa-invoices");
+
+  return (
+    <div className="max-w-7xl mx-auto p-6 space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <h1 className="text-2xl font-bold text-gray-800">
+          Quotation Management
+        </h1>
+        <div className="flex items-center gap-3">
+          <Link
+            href={
+              filters.customer_id
+                ? `/user-dashboard/quotations/new?customerId=${encodeURIComponent(filters.customer_id)}`
+                : "/user-dashboard/quotations/new"
+            }
+            className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-center"
+          >
+            + New Quotation
+          </Link>
+          {canPerformaInvoice ? (
+            <Link
+              href="/user-dashboard/invoices/performa"
+              className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 text-center"
+            >
+              Performa Invoice
+            </Link>
+          ) : null}
+        </div>
+      </div>
+
+      <form
+        className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 bg-white p-3 rounded shadow"
+        method="get"
+      >
+        {filters.customer_id ? (
+          <input
+            type="hidden"
+            name="customer_id"
+            value={filters.customer_id}
+          />
+        ) : null}
+        <input
+          type="text"
+          name="search"
+          placeholder="Search ID, client, email, phone, created by"
+          defaultValue={filters.search}
+          className="p-2 border rounded"
+        />
+        <input
+          type="date"
+          name="date_from"
+          defaultValue={filters.date_from}
+          className="p-2 border rounded"
+        />
+        <input
+          type="date"
+          name="date_to"
+          defaultValue={filters.date_to}
+          className="p-2 border rounded"
+        />
+        <button type="submit" className="p-2 bg-green-600 text-white rounded">
+          Apply
+        </button>
+        <a
+          href={
+            filters.customer_id
+              ? `?customer_id=${encodeURIComponent(filters.customer_id)}`
+              : "?"
+          }
+          className="p-2 border rounded text-center"
+        >
+          Reset
+        </a>
+      </form>
+
+      <UserQuotationsListClient 
+        quotations={quotations}
+        isServiceSupport={role === "SERVICE SUPPORT"}
+      />
+    </div>
+  );
+}

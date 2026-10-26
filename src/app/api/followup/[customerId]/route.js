@@ -1,0 +1,314 @@
+import { getDbConnection } from "@/lib/db";
+import { cookies } from "next/headers";
+import { jwtVerify } from "jose";
+import { convertISTtoUTC } from "@/lib/timezone";
+import { ensureCustomersServiceColumns } from "@/lib/ensureCustomersServiceColumns";
+import { ensureCustomersGemColumns } from "@/lib/ensureCustomersGemColumns";
+import { ensureCustomersFollowupNotesText } from "@/lib/ensureCustomersFollowupNotesText";
+import { isGemRole } from "@/lib/isGemRole";
+import { updateCustomerNotesLanguage } from "@/lib/customerFollowupNotesLanguage";
+
+const JWT_SECRET = process.env.JWT_SECRET || "your-secret";
+
+async function getLatestSalesMultiTag(conn, customerId) {
+  const [rows] = await conn.execute(
+    `SELECT multi_tag FROM customers_followup
+     WHERE customer_id = ? AND multi_tag IS NOT NULL AND TRIM(multi_tag) != ''
+     ORDER BY time_stamp DESC, followed_date DESC
+     LIMIT 1`,
+    [customerId],
+  );
+  return rows[0]?.multi_tag ?? null;
+}
+
+// GET: Fetch follow-up history for a customer
+export async function GET(req, { params }) {
+  const { customerId } = await params;
+
+  const cookieStore = await cookies();
+  const token = cookieStore.get("token")?.value;
+  if (!token) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+    });
+  }
+
+  let currentUser = null;
+  let userRole = null;
+  try {
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(JWT_SECRET),
+    );
+    currentUser = payload.username || null;
+    userRole = payload.role || null;
+  } catch (e) {
+    return new Response(JSON.stringify({ error: "Invalid token" }), {
+      status: 401,
+    });
+  }
+
+  const conn = await getDbConnection();
+  await ensureCustomersFollowupNotesText(conn);
+
+  let sql = `SELECT 
+      followed_date,
+      next_followup_date,
+      service_next_followup,
+      gem_next_followup,
+      comm_mode,
+      notes,
+      notes_language,
+      followed_by,
+      time_stamp,
+      multi_tag
+     FROM customers_followup
+     WHERE customer_id = ?`;
+
+  let queryParams = [customerId];
+
+  // Team Leader and Accountant can only see their own follow-up history for this customer
+  if (userRole === "TEAM LEADER" || userRole === "ACCOUNTANT") {
+    sql += ` AND followed_by = ?`;
+    queryParams.push(currentUser);
+  }
+
+  sql += ` ORDER BY time_stamp DESC, followed_date DESC`;
+
+  const [rows] = await conn.execute(sql, queryParams);
+
+  return new Response(JSON.stringify({ success: true, history: rows || [] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+export async function POST(req, { params }) {
+  const { customerId } = await params;
+  const data = await req.json();
+
+  // Identify current user from JWT cookie
+  const cookieStore = await cookies();
+  const token = cookieStore.get("token")?.value;
+  if (!token) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+    });
+  }
+
+  let followedBy = null;
+  let userRole = null;
+  try {
+    const { payload } = await jwtVerify(
+      token,
+      new TextEncoder().encode(JWT_SECRET),
+    );
+    followedBy = payload.username || null;
+    userRole = payload.role || null;
+  } catch (e) {
+    return new Response(JSON.stringify({ error: "Invalid token" }), {
+      status: 401,
+    });
+  }
+
+  const conn = await getDbConnection();
+  await ensureCustomersServiceColumns(conn);
+  await ensureCustomersGemColumns(conn);
+  await ensureCustomersFollowupNotesText(conn);
+
+  // First try to get from customers_followup (existing records), fallback to customers table
+  let [rows] = await conn.execute(
+    "SELECT name, contact, email FROM customers_followup WHERE customer_id = ? ORDER BY followed_date DESC LIMIT 1",
+    [customerId],
+  );
+
+  let name, contact, email;
+
+  if (rows.length > 0) {
+    ({ name, contact, email } = rows[0]);
+  } else {
+    // Fallback to customers table
+    const [customerRows] = await conn.execute(
+      "SELECT first_name, phone, email FROM customers WHERE customer_id = ? LIMIT 1",
+      [customerId],
+    );
+
+    if (customerRows.length === 0) {
+      return new Response(JSON.stringify({ error: "Customer not found" }), { status: 404 });
+    }
+
+    ({ first_name: name, phone: contact, email } = customerRows[0]);
+  }
+
+  // Convert IST datetime to UTC before storing
+  const followedDateUTC = convertISTtoUTC(data.followed_date);
+  
+  let nextFollowupDateUTC;
+  let serviceNextFollowupUTC = null;
+  let gemNextFollowupUTC = null;
+  
+  // If status is Denied, automatically set next follow-up date to 4 days from now (UTC)
+  if (data.status === "Denied") {
+    const now = new Date();
+    const fourDaysLater = new Date(now.getTime() + 4 * 24 * 60 * 60 * 1000);
+    nextFollowupDateUTC = fourDaysLater.toISOString();
+  } else {
+    nextFollowupDateUTC = convertISTtoUTC(data.next_followup_date);
+  }
+
+  // Convert service_next_followup if provided (SERVICE SUPPORT)
+  if (data.service_next_followup) {
+    serviceNextFollowupUTC = convertISTtoUTC(data.service_next_followup);
+  }
+
+  // Convert gem_next_followup if provided (GEM)
+  if (data.gem_next_followup) {
+    gemNextFollowupUTC = convertISTtoUTC(data.gem_next_followup);
+  }
+
+  // Fetch the latest existing service_next_followup and gem_next_followup
+  // so that when Sales inserts, we preserve GEM/Service dates (don't NULL them out)
+  // and when SERVICE SUPPORT inserts, we preserve Sales next_followup_date, etc.
+  const [latestFollowup] = await conn.execute(
+    `SELECT next_followup_date, service_next_followup, gem_next_followup 
+     FROM customers_followup 
+     WHERE customer_id = ? 
+     AND (next_followup_date IS NOT NULL OR service_next_followup IS NOT NULL OR gem_next_followup IS NOT NULL)
+     ORDER BY followed_date DESC LIMIT 1`,
+    [customerId]
+  );
+  const latestDates = latestFollowup[0] || {};
+
+  let insertNextDate = null;
+  let insertServiceNext = null;
+  let insertGemNext = null;
+
+  if (userRole === "SERVICE SUPPORT") {
+    // SERVICE SUPPORT role - update service_next_followup, preserve others
+    insertServiceNext = serviceNextFollowupUTC;
+    insertNextDate = latestDates.next_followup_date || null;
+    insertGemNext = latestDates.gem_next_followup || null;
+  } else if (isGemRole(userRole)) {
+    // GEM / GEM PORTAL - update gem_next_followup, preserve others
+    insertGemNext = gemNextFollowupUTC;
+    insertNextDate = latestDates.next_followup_date || null;
+    insertServiceNext = latestDates.service_next_followup || null;
+  } else {
+    // Sales / normal role - update next_followup_date, preserve others
+    insertNextDate = data.status === "Denied" ? null : nextFollowupDateUTC;
+    insertServiceNext = latestDates.service_next_followup || null; // preserve Service date
+    insertGemNext = latestDates.gem_next_followup || null;         // preserve GEM date
+  }
+
+  const notesLanguage = String(data.notes_language || "").trim().slice(0, 10);
+  if (!notesLanguage) {
+    return new Response(JSON.stringify({ error: "Language is required." }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const purpose = data.purpose ? data.purpose.slice(0, 100) : null;
+  const isServiceSupport = userRole === "SERVICE SUPPORT";
+  const serviceStatus = isServiceSupport
+    ? String(data.service_status || "").trim().slice(0, 50) || null
+    : null;
+  const serviceStage = isServiceSupport
+    ? String(data.service_stage || "").trim().slice(0, 100) || null
+    : null;
+  const serviceTags = isServiceSupport
+    ? String(data.service_tags || "").trim().slice(0, 255) || null
+    : null;
+  const isGEM = isGemRole(userRole);
+  const gemStatus = isGEM
+    ? String(data.gem_status || "").trim().slice(0, 50) || null
+    : null;
+  const gemStage = isGEM
+    ? String(data.gem_stage || "").trim().slice(0, 100) || null
+    : null;
+  const gemTags = isGEM
+    ? String(data.gem_tags || "").trim().slice(0, 255) || null
+    : null;
+
+  let insertMultiTag = null;
+  if (isServiceSupport || isGEM) {
+    insertMultiTag = await getLatestSalesMultiTag(conn, customerId);
+  } else {
+    const submitted = String(data.multi_tag ?? "").trim();
+    insertMultiTag = submitted || (await getLatestSalesMultiTag(conn, customerId));
+  }
+
+  await conn.execute(
+    `INSERT INTO customers_followup 
+    (customer_id, name, contact, email, next_followup_date, service_next_followup, gem_next_followup, followed_date, comm_mode, notes, notes_language, followed_by, multi_tag, purpose)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      customerId,
+      name,
+      contact,
+      email,
+      insertNextDate,
+      insertServiceNext,
+      insertGemNext,
+      followedDateUTC,
+      data.communication_mode,
+      data.notes,
+      notesLanguage,
+      followedBy,
+      insertMultiTag,
+      purpose,
+    ],
+  );
+
+  await updateCustomerNotesLanguage(conn, customerId, notesLanguage);
+
+  if (isServiceSupport) {
+    await conn.execute(
+      `UPDATE customers SET service_status = ?, service_stage = ?, service_tags = ? WHERE customer_id = ?`,
+      [serviceStatus, serviceStage || "New", serviceTags, customerId],
+    );
+  }
+
+  if (isGEM) {
+    await conn.execute(
+      `UPDATE customers SET gem_status = ?, gem_stage = ?, gem_tags = ? WHERE customer_id = ?`,
+      [gemStatus, gemStage || "New", gemTags, customerId],
+    );
+  }
+
+  // If status is Denied, insert second follow-up row with employee name + notes + client name + contact
+  if (data.status === "Denied") {
+    const currentDateTime = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const secondRowNotes = `(${followedBy}) marked (${name}-${contact}) as Denied dated (${currentDateTime}), ${data.notes}`;
+    await conn.execute(
+      `INSERT INTO customers_followup 
+      (customer_id, name, contact, email, next_followup_date, service_next_followup, gem_next_followup, followed_date, comm_mode, notes, notes_language, followed_by, multi_tag, purpose)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        customerId,
+        name,
+        contact,
+        email,
+        nextFollowupDateUTC,
+        null,
+        null,
+        followedDateUTC,
+        data.communication_mode,
+        secondRowNotes,
+        notesLanguage,
+        followedBy,
+        insertMultiTag,
+        purpose,
+      ],
+    );
+  }
+
+  // Only update sales status/stage on customers table (not SERVICE SUPPORT or GEM roles)
+  if ((data.status || data.stage) && userRole !== "SERVICE SUPPORT" && !isGemRole(userRole)) {
+    await conn.execute(
+      `UPDATE customers SET status=?, stage=? WHERE customer_id=?`,
+      [data.status, data.stage || "New", customerId],
+    );
+  }
+
+  return new Response(JSON.stringify({ success: true }), { status: 200 });
+}
